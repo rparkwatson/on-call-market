@@ -622,9 +622,9 @@ def participant_view(Session, token):
     participant, cycle = found
     st.title(cycle["name"])
     st.write("Hello **%s**." % participant["name"])
-    if cycle["deadline_note"]:
-        st.info(cycle["deadline_note"])
     state = cycle["state"]
+    if cycle["deadline_note"] and state in ("draft", "collecting"):
+        st.info(cycle["deadline_note"])
     if state == "draft":
         st.info("The organiser has not opened collection yet. Come back later.")
         return
