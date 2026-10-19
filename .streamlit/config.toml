@@ -1,0 +1,13 @@
+# Streamlit settings for the hosted on-call market (read locally and on Community Cloud).
+# Secrets (DATABASE_URL) go in .streamlit/secrets.toml locally, which is gitignored, and in
+# the app's Secrets box on Community Cloud; see docs/deploy.md.
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#0f6e56"
