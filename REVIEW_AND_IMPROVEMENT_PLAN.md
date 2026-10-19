@@ -142,26 +142,32 @@ Phased so the hosted version is built on a solver that is tested and general.
 
 ### Phase 1: hosted web application (MVP)
 
-Proposed architecture (subject to Q2 to Q4):
+Decided on 2026-10-19 (see section 7): Streamlit Community Cloud (free) with a free Neon
+Postgres database, deployed from a public GitHub repository. This replaces the FastAPI proposal
+in the first draft.
 
-- Backend in Python (FastAPI), SQLite for a single-instance deployment (Postgres later), the
-  solver run in a background worker so requests return at once.
-- Server-rendered pages with a small amount of JavaScript, reusing the existing sheet UI reduced
-  to one column per participant.
-- One Docker image; HTTPS terminated by the host.
+- One Streamlit app (`streamlit_app.py` plus an `app/` package). The link's query parameter
+  selects the view: participant form, organiser dashboard, or published schedule.
+- Storage through SQLAlchemy: Neon Postgres in production (`DATABASE_URL` from Streamlit
+  secrets), a SQLite file for local development and tests. Tables: cycles, participants (name,
+  token, budget, responded), submissions (cells, saved at), runs (parameters, seed, result,
+  chosen), edits (what changed, when), publications.
+- Solver called in-process with a spinner (7 to 25 s). Several seeds per run so that
+  welfare-equivalent alternatives are shown to the organiser. Packages derived automatically for
+  the responders (T2), with the built-in packages as the fallback for 7 people over 9 weekdays.
+- Deployment: `requirements.txt`, `.streamlit/config.toml`, secrets set in the Streamlit
+  dashboard, code compatible with Python 3.11 to 3.13 (Streamlit Cloud may not offer 3.14).
+  The app sleeps after idle time on the free tier; a visitor may have to click to wake it.
+- No emails stored anywhere. Tokens are unguessable; the organiser's admin token is separate
+  from participant tokens; the public repository contains code only.
 
-Data model: Group -> Cycle (structure, dates, holidays, deadline, state: draft / collecting /
-solved / published) -> Participant (name, email, access token, budget) -> Submission (cells,
-submitted at) -> Run (parameters, result, prices, ties) -> Published schedule.
+Organiser flow: create cycle -> add names -> copy links and send them by hand -> watch
+submissions -> close collection at the deadline -> run the market (non-responders excluded) ->
+review (ties, warnings, manual swaps with a log) -> publish -> download CSVs.
 
-Organiser flow: create cycle -> add people -> send links -> watch submissions -> run the solver
-at the deadline -> review (ties, warnings, manual swaps) -> publish -> export CSV and ICS.
-
-Participant flow: open personal link -> see own column only -> rank, mark X, save (editable
-until the deadline) -> after publishing, see the schedule and own summary.
-
-Security basics: signed per-participant tokens, organiser login, CSRF protection, rate limits,
-no global state, a log of who changed what.
+Participant flow: open personal link -> see own column only -> rank at least the minimum
+number of slots, mark X where unavailable, save (editable until collection closes) -> after
+publishing, see the schedule only.
 
 ### Phase 2: fairness over time and organiser tooling
 
@@ -184,14 +190,17 @@ parallel without touching the same files.
 | T1 | Test suite and library entry point (0.1, 0.2) | `tests/`, `oncall_market.py` (entry point only) | none |
 | T2 | Automatic packages and `packages_example.json` (0.3) | new `packages.py`, README | T1 |
 | T3 | Tie handling, metrics, edge cases, five-block (0.4 to 0.6) | `oncall_market.py` | T1 |
-| T4 | Web app: data model, auth, participant form, organiser dashboard (Phase 1) | new `webapp/` | T1 for the result shape; otherwise parallel |
-| T5 | Deployment: Dockerfile, configuration, hosting guide | `webapp/`, `docs/` | T4 |
+| T4 | Streamlit app: storage, participant form, organiser dashboard, publish, CSV export, deploy files and guide (Phase 1) | new `streamlit_app.py`, `app/`, `tests/test_app*.py`, `requirements.txt`, `.streamlit/config.toml`, `docs/deploy.md` | none; adapter seam for T1 and T2 |
+| T5 | Deployment steps that need your accounts: GitHub push, Neon database, Streamlit Cloud app and secrets | manual, following `docs/deploy.md` | T4 |
 | T6 | Documentation: README, organiser guide, participant guide | `README.md`, `docs/` | all |
 
 Recommendation: put this folder under git first, so each session works in an isolated worktree
 and every change arrives as a reviewable diff.
 
 ## 6. Open questions
+
+All of these were answered on 2026-10-19; the answers are in section 7, which takes precedence
+over any default proposed below.
 
 Answers to Q1 to Q4 change the architecture; the rest change details. Where a default is
 proposed, nothing proceeds on it until you confirm or correct it.
@@ -256,3 +265,25 @@ real cycle? That sets what must be in the MVP.
 
 **Q14. Repository.** May I initialise a git repository in this folder so delegated sessions
 work in isolated worktrees and every change is reviewable?
+
+## 7. Decisions (answers received 2026-10-19)
+
+| Question | Decision |
+|---|---|
+| Q1 group and period | Headcount and cycle length vary from cycle to cycle, so packages must be derived automatically. Largest group: 10 people. Which of the three structures is in use was not captured; the three-shift structure stays the default and all three remain supported. |
+| Q2 hosting and data | No emails stored; the organiser sends personal links by hand. Host: Streamlit Community Cloud (free) with a free Neon Postgres database. Code in a public GitHub repository. |
+| Q3 sign-in | Personal links only, no accounts. The organiser uses a separate secret admin link. |
+| Q4 stack | Streamlit (Python) for the whole app; SQLAlchemy to Postgres in production and SQLite locally. The solver stays standard-library only. Replaces the FastAPI proposal. |
+| Q5 roles | The organiser may edit the solved schedule by hand before publishing; every change is logged and shown with the schedule. Who the group is and whether there is more than one organiser was not asked; the admin link can simply be shared. |
+| Q6 non-responders | Always excluded from the cycle; packages are re-derived for the responders only. |
+| Q7 ranking rule | Free ranking with a minimum count equal to the largest package size plus two; the form shows the point value each rank produces. |
+| Q8 fairness over time | Damped carry-over: next budget = 100 plus half of last cycle's compensation, capped at plus or minus 25; the heavy package rotates using history. After the MVP; the MVP stores what it needs (net price per person per cycle, an editable budget). |
+| Q9 visibility | Participants see the published schedule only. Prices, summaries and budgets are organiser-only. |
+| Q10 package rules | The four principles (hours at the floor, evenings balanced, at most one shift a day, no late-then-early) are the complete list. |
+| Q11 notifications | The app sends no email. ICS export comes after the MVP (the MVP scope chosen under Q13 is links, form, solve and publish, CSV export). |
+| Q12 coverage | Weekdays only, whole-slot availability. No weekend, holiday or partial-day coverage in the MVP. |
+| Q13 timeline | 2 to 12 November 2026 is the next real cycle and the hosted MVP must be ready for it, so collection should open by about 27 October 2026. |
+| Q14 repository | Git initialised on 2026-10-19 (branch `main`). T1 and T2 started the same day in their own worktrees. |
+
+Still open: which shift structure the group actually uses; the GitHub repository name and the
+go-ahead to push (pushing publishes the code).

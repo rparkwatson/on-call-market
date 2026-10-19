@@ -11,7 +11,8 @@ summary.csv
 preferences.csv
 budgets.csv
 
-# Local data for the hosted app (added later)
+# Local data and secrets for the hosted app; the repository is public, so none of this may be committed
 *.sqlite3
 *.db
 .env
+.streamlit/secrets.toml
