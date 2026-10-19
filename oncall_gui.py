@@ -18,13 +18,12 @@ uses, and download schedule.csv and summary.csv.
 
 import argparse
 import json
-import random
 import re
 import socket
 import sys
 import threading
 import webbrowser
-from datetime import date
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import oncall_market as om
@@ -124,46 +123,60 @@ def sheet_payload(problem):
 
 
 def run_solve(body):
+    """Solve what the page sent.  The sheet goes through om.solve_sheet() as CSV text, the same
+    path as the command line, and the results page is built from its plain dict alone."""
     problem = make_problem(body.get("setup", {}))
     mode = body.get("mode", "rank")
     if mode not in ("rank", "points"):
         raise om.SchedulingError("Cells must contain ranks or points.")
-    market_roles = body.get("roles_mode", "market") != "fixed"
     roles = None
-    if not market_roles:
+    if body.get("roles_mode", "market") == "fixed":
         chosen = body.get("roles", {}) or {}
-        roles = [chosen.get(p) or None for p in problem.people]
-        missing = [p for p, r in zip(problem.people, roles) if r is None]
+        missing = [p for p in problem.people if not chosen.get(p)]
         if missing:
             raise om.SchedulingError("Pick a package for: " + ", ".join(missing))
-    slot_rows = slot_rows_from_cells(problem, body.get("cells", {}))
-    values, avail = om.preference_values(problem, slot_rows, mode, random.Random(1))
-    result = om.solve(problem, values, avail, market_roles, roles)
-    text, summary_rows, schedule_rows = om.build_report(problem, values, avail, result)
-    LAST.update({"problem": problem, "values": values, "avail": avail, "result": result})
+        roles = {p: chosen[p] for p in problem.people}
+    text = om.preferences_text(problem, cells_matrix(problem, body.get("cells", {})))
+    solution = om.solve_sheet(text, structure=problem.structure, mode=mode, roles=roles,
+                              max_per_day=problem.max_per_day)
+    LAST["solution"] = solution
+    return results_payload(solution)
 
-    prices = result["prices"]
-    price_rows = []
-    for d, dt in enumerate(problem.dates):
-        price_rows.append([om.fmt_date(dt)] + [round(prices[j], 1) for j in problem.slots_by_day[d]])
-    if result["cleared"]:
+
+def results_payload(solution):
+    """The JSON the results page renders, from a solve_sheet() result."""
+    shifts = om.STRUCTURES[solution["structure"]]["shifts"]
+    dates = [date.fromisoformat(d) for d in solution["dates"]]
+    by_date = {}
+    for row in solution["schedule"]:
+        by_date.setdefault(row["date"], []).append(row)
+    schedule_rows, price_rows = [], []
+    for d, dt in enumerate(dates):
+        if d > 0 and (dt - dates[d - 1]).days > 1:
+            first, last = dates[d - 1] + timedelta(days=1), dt - timedelta(days=1)
+            gap = om.fmt_date(first) if first == last else "%s - %s" % (om.fmt_date(first), om.fmt_date(last))
+            schedule_rows.append(["no coverage %s" % gap] + [""] * len(shifts))
+        rows = by_date[dt.isoformat()]
+        schedule_rows.append([om.fmt_date(dt)] + [r["person"] for r in rows])
+        price_rows.append([om.fmt_date(dt)] + [round(r["price"], 1) for r in rows])
+    if solution["cleared"]:
         status = ("The market cleared exactly in %d rounds: everyone holds the bundle they would pick for "
-                  "themselves at these prices." % result["rounds"])
+                  "themselves at these prices." % solution["rounds"])
     else:
         status = ("Prices support this assignment with a maximum regret of %.2f points "
-                  "(0 = exact equilibrium; under 0.1 is as good as exact)." % result["max_regret"])
-    if any(r["violations"] for r in summary_rows):
+                  "(0 = exact equilibrium; under 0.1 is as good as exact)." % solution["max_regret"])
+    if any(r["violations"] for r in solution["summary"]):
         status += (" WARNING: the best schedule found still breaks a rule - usually the X's leave a day "
                    "short-handed. Allow 2 shifts per day or ask for fewer X's.")
     return {
         "status": status,
-        "cleared": result["cleared"],
-        "schedule": {"columns": ["Date"] + [sh["label"] for sh in problem.shifts],
-                     "rows": [[label] + cells for label, cells in schedule_rows]},
-        "people": summary_rows,
-        "prices": {"columns": ["Date"] + [sh["code"] for sh in problem.shifts], "rows": price_rows},
-        "pkg_prices": {k: round(v, 1) for k, v in result["pkg_prices"].items()} if result["market_roles"] else None,
-        "report": text,
+        "cleared": solution["cleared"],
+        "schedule": {"columns": ["Date"] + [sh["label"] for sh in shifts], "rows": schedule_rows},
+        "people": solution["summary"],
+        "prices": {"columns": ["Date"] + [sh["code"] for sh in shifts], "rows": price_rows},
+        "pkg_prices": ({k: round(v, 1) for k, v in solution["package_prices"].items()}
+                       if solution["market_roles"] else None),
+        "report": solution["report"],
     }
 
 
@@ -201,17 +214,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             self._send(200, PAGE, "text/html; charset=utf-8")
         elif self.path == "/api/download/schedule.csv" or self.path == "/api/download/summary.csv":
-            if "result" not in LAST:
+            if "solution" not in LAST:
                 self._send(404, "Solve first, then download.", "text/plain; charset=utf-8")
                 return
-            import tempfile
-            with tempfile.TemporaryDirectory() as tmp:
-                sched, summ = om.write_outputs(LAST["problem"], LAST["values"], LAST["avail"], LAST["result"], tmp)
-                path = sched if self.path.endswith("schedule.csv") else summ
-                with open(path, "rb") as f:
-                    data = f.read()
             name = self.path.rsplit("/", 1)[-1]
-            self._send(200, data, "text/csv; charset=utf-8", {"Content-Disposition": "attachment; filename=%s" % name})
+            text = (om.schedule_csv_text if name == "schedule.csv" else om.summary_csv_text)(LAST["solution"])
+            self._send(200, text, "text/csv; charset=utf-8", {"Content-Disposition": "attachment; filename=%s" % name})
         else:
             self._send(404, "Not found", "text/plain; charset=utf-8")
 

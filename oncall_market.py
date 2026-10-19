@@ -894,23 +894,12 @@ def build_report(problem, values, avail, result):
 
 
 def write_outputs(problem, values, avail, result, out_dir):
-    """Write schedule.csv and summary.csv into out_dir; returns their paths."""
-    _, rows, _ = build_report(problem, values, avail, result)
-    owner, prices = result["owner"], result["prices"]
-    out_dir = out_dir.rstrip("/\\") or "."
-    sched = out_dir + "/schedule.csv"
-    summ = out_dir + "/summary.csv"
-    with open(sched, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["slot_id", "date", "weekday", "shift", "time", "hours", "person", "clearing_price"])
-        for j, s in enumerate(problem.slots):
-            w.writerow([s["id"], s["date"].isoformat(), s["date"].strftime("%a"), s["code"], s["time"], s["hours"],
-                        problem.people[owner[j]], round(prices[j], 2)])
-    with open(summ, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        w.writeheader()
-        w.writerows(rows)
-    return sched, summ
+    """Write schedule.csv and summary.csv from a solve() result; returns their paths.
+
+    Kept for existing callers: the files are produced by write_solution() from the
+    plain dict that solution_dict() builds, so every front end writes the same bytes.
+    """
+    return write_solution(solution_dict(problem, values, avail, result), out_dir)
 
 
 def validate_roles(problem, roles):
@@ -925,6 +914,154 @@ def validate_roles(problem, roles):
            for k in problem.packages if counts[k] != problem.packages[k]["count"]]
     if bad:
         raise SchedulingError("The fixed packages give the wrong number of people to: " + ", ".join(bad))
+
+
+# ---------------------------------------------------------------------------
+# Library entry point: the command line, the local GUI and the hosted app all go through here
+# ---------------------------------------------------------------------------
+
+def prepare_sheet(text, *, structure=None, mode="rank", packages=None, max_per_day=1, budgets=None, seed=1):
+    """Turn preferences CSV text into solver inputs.  Returns (problem, values, avail).
+
+    The first half of solve_sheet(); cmd_solve calls it directly so that it can print the
+    problem size and parse --roles-map before solving.  Arguments are as for solve_sheet().
+    """
+    if mode not in ("rank", "points"):
+        raise SchedulingError("mode must be 'rank' or 'points', not %r." % (mode,))
+    people, slot_rows = parse_preferences(text)
+    structure = structure or infer_structure(slot_rows)
+    if structure not in STRUCTURES:
+        raise SchedulingError("Unknown structure %r (choose from %s)." % (structure, ", ".join(STRUCTURES)))
+    dates = sorted({r["date"] for r in slot_rows})
+    problem = Problem(structure, dates, people, packages, max_per_day=max_per_day)
+    if budgets:
+        unknown = sorted(set(budgets) - set(people))
+        if unknown:
+            raise SchedulingError("Budgets name people not in the preferences file: %s" % ", ".join(unknown))
+    values, avail = preference_values(problem, slot_rows, mode, random.Random(seed), budgets)
+    return problem, values, avail
+
+
+def roles_in_order(problem, roles):
+    """A {person: package} mapping as the list solve() takes (sheet order; None where a person is missing)."""
+    unknown = sorted(set(roles) - set(problem.people))
+    if unknown:
+        raise SchedulingError("roles name people not in the preferences file: %s" % ", ".join(unknown))
+    return [roles.get(p) or None for p in problem.people]
+
+
+def solution_dict(problem, values, avail, result):
+    """The plain, JSON-serialisable form of a solve() result (the shape is documented in solve_sheet)."""
+    text, rows, _ = build_report(problem, values, avail, result)
+    owner, prices = result["owner"], result["prices"]
+    schedule = [{"slot_id": s["id"], "date": s["date"].isoformat(), "weekday": s["date"].strftime("%a"),
+                 "shift": s["code"], "time": s["time"], "hours": s["hours"],
+                 "person": problem.people[owner[j]], "price": prices[j]}
+                for j, s in enumerate(problem.slots)]
+    return {
+        "structure": problem.structure,
+        "people": list(problem.people),
+        "dates": [d.isoformat() for d in problem.dates],
+        "schedule": schedule,
+        "summary": rows,
+        "prices": {s["id"]: prices[j] for j, s in enumerate(problem.slots)},
+        "package_prices": dict(result["pkg_prices"]) if result["market_roles"] else None,
+        "cleared": bool(result["cleared"]),
+        "rounds": int(result["rounds"]),
+        "max_regret": float(result["max_regret"]),
+        "market_roles": bool(result["market_roles"]),
+        "report": text,
+    }
+
+
+def solve_sheet(text, *, structure=None, mode="rank", roles=None, packages=None, max_per_day=1, budgets=None,
+                seed=1, iters=400, step=3.0, decay=40.0, sa_iters=40000, restarts=4, log=None):
+    """Solve a preferences sheet end to end and return a plain dict.
+
+    This is the one library entry point: the command line (cmd_solve), the local GUI
+    (oncall_gui.run_solve) and the hosted app all go through the same path
+    (prepare_sheet -> solve -> solution_dict).  The defaults are the `solve` command's defaults.
+
+    Arguments
+      text         preferences CSV text in the format `template` writes: comment lines starting
+                   with '#', the header slot_id,date,weekday,shift,time,hours,<one column per
+                   person>, then one row per slot.  Cells hold a rank (or points), nothing
+                   (available, no preference) or an unavailable token such as X.
+      structure    'single', 'two' or 'three'; inferred from the shift codes when None.
+      mode         'rank' (1 = favourite) or 'points' (higher = want more).
+      roles        None lets the market hand out the packages and price them; a
+                   {person: package} mapping fixes them (every person must be named).
+      packages     None for the built-in packages, or a dict in the --packages JSON format.
+      max_per_day  shifts one person may take on the same day.
+      budgets      optional {person: points}; anyone not named gets BUDGET (100 points).
+      seed, iters, step, decay, sa_iters, restarts
+                   the `solve` command's options of the same names.
+      log          optional callable that receives progress lines (the CLI passes print).
+
+    Returns a dict with exactly these keys (all values are JSON-serialisable):
+      structure       'single' | 'two' | 'three'
+      people          [name, ...] in sheet order
+      dates           ['YYYY-MM-DD', ...] the covered days in order (weekends/holidays absent)
+      schedule        [{slot_id, date, weekday, shift, time, hours, person, price}, ...] one
+                      entry per slot in date order (shifts in structure order within a day).
+                      price is the slot's clearing price, unrounded; schedule.csv rounds it
+                      to 2 decimals as clearing_price.
+      summary         one row per person in sheet order, the rows of summary.csv:
+                      {person, package, shifts, hours, points_received, pct_of_ideal,
+                       net_price, next_budget_suggestion, violations, slots}
+                      where slots is a space-separated string of slot ids and the point
+                      and price figures are rounded to 1 decimal.
+      prices          {slot_id: price} (unrounded)
+      package_prices  {package: price}, or None when roles were fixed
+      cleared         True when the market cleared exactly
+      rounds          price-adjustment rounds used
+      max_regret      the most anyone could gain by switching bundles at the final prices
+                      (0.0 for an exact clearing)
+      market_roles    False when roles were fixed
+      report          the text report the `solve` command prints
+
+    Raises SchedulingError for anything the user has to fix (bad sheet, impossible X's,
+    packages that do not add up, a wrong roles mapping).
+    """
+    problem, values, avail = prepare_sheet(text, structure=structure, mode=mode, packages=packages,
+                                           max_per_day=max_per_day, budgets=budgets, seed=seed)
+    market_roles = roles is None
+    role_list = None if market_roles else roles_in_order(problem, roles)
+    result = solve(problem, values, avail, market_roles, role_list, iters, step, decay, sa_iters, restarts, seed, log)
+    return solution_dict(problem, values, avail, result)
+
+
+def schedule_csv_text(solution):
+    """schedule.csv as text, from a solve_sheet() result."""
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["slot_id", "date", "weekday", "shift", "time", "hours", "person", "clearing_price"])
+    for r in solution["schedule"]:
+        w.writerow([r["slot_id"], r["date"], r["weekday"], r["shift"], r["time"], r["hours"], r["person"],
+                    round(r["price"], 2)])
+    return buf.getvalue()
+
+
+def summary_csv_text(solution):
+    """summary.csv as text, from a solve_sheet() result."""
+    rows = solution["summary"]
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+    w.writeheader()
+    w.writerows(rows)
+    return buf.getvalue()
+
+
+def write_solution(solution, out_dir):
+    """Write schedule.csv and summary.csv from a solve_sheet() result into out_dir; returns their paths."""
+    out_dir = out_dir.rstrip("/\\") or "."
+    sched = out_dir + "/schedule.csv"
+    summ = out_dir + "/summary.csv"
+    with open(sched, "w", newline="", encoding="utf-8") as f:
+        f.write(schedule_csv_text(solution))
+    with open(summ, "w", newline="", encoding="utf-8") as f:
+        f.write(summary_csv_text(solution))
+    return sched, summ
 
 
 # ---------------------------------------------------------------------------
@@ -1022,39 +1159,36 @@ def cmd_demo(args):
 
 
 def cmd_solve(args):
-    people, slot_rows = read_preferences(args.preferences)
-    structure = args.structure or infer_structure(slot_rows)
-    dates = sorted({r["date"] for r in slot_rows})
+    with open(args.preferences, encoding="utf-8-sig") as f:
+        text = f.read()
     packages = None
     if args.packages:
         with open(args.packages, encoding="utf-8") as f:
             packages = json.load(f)
-    problem = Problem(structure, dates, people, packages, max_per_day=args.max_per_day)
-    rng = random.Random(args.seed)
     budgets = None
     if args.budgets:
         budgets = {}
         with open(args.budgets, newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
                 budgets[row["person"].strip()] = float(row["budget"])
-        unknown = sorted(set(budgets) - set(people))
-        if unknown:
-            raise SchedulingError("--budgets names people not in the preferences file: %s" % ", ".join(unknown))
-    values, avail = preference_values(problem, slot_rows, args.mode, rng, budgets)
+    # Same path as solve_sheet(): prepare_sheet -> solve -> solution_dict, split here only so the
+    # problem size can be printed and --roles-map parsed (with its own messages) before solving.
+    problem, values, avail = prepare_sheet(text, structure=args.structure, mode=args.mode, packages=packages,
+                                           max_per_day=args.max_per_day, budgets=budgets, seed=args.seed)
 
     market_roles = args.roles == "market"
-    roles = None if market_roles else parse_roles_map(args.roles_map or "", people, problem.packages)
+    roles = None if market_roles else parse_roles_map(args.roles_map or "", problem.people, problem.packages)
 
     print("Structure: %s (%s); %d slots over %d days; %d people; %s mode; roles decided by %s."
-          % (structure, problem.st["description"], len(problem.slots), len(dates), len(people), args.mode,
-             "the market" if market_roles else "the organiser"))
+          % (problem.structure, problem.st["description"], len(problem.slots), len(problem.dates),
+             len(problem.people), args.mode, "the market" if market_roles else "the organiser"))
     log = (lambda s: None) if args.quiet else print
     result = solve(problem, values, avail, market_roles, roles, args.iters, args.step, args.decay,
                    args.sa_iters, args.restarts, args.seed, log)
-    text, _, _ = build_report(problem, values, avail, result)
+    solution = solution_dict(problem, values, avail, result)
     print()
-    print(text)
-    sched, summ = write_outputs(problem, values, avail, result, args.out_dir)
+    print(solution["report"])
+    sched, summ = write_solution(solution, args.out_dir)
     print("Wrote %s and %s" % (sched, summ))
 
 
