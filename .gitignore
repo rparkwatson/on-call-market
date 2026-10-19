@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Solver outputs and the live (real) preferences sheet; the example sheet stays tracked
+schedule.csv
+summary.csv
+preferences.csv
+budgets.csv
+
+# Local data for the hosted app (added later)
+*.sqlite3
+*.db
+.env
