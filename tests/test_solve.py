@@ -158,6 +158,13 @@ class TestSolveSheetInputs:
         assert list(problem.packages) == ["all"]
         assert problem.max_per_day == 2
 
+    def test_iteration_counts_must_be_at_least_one(self, example_text):
+        problem, values, avail = om.prepare_sheet(example_text)
+        for kwargs, name in ((dict(iters=0), "iters"), (dict(sa_iters=0), "sa_iters"), (dict(restarts=-1), "restarts")):
+            with pytest.raises(om.SchedulingError) as exc:
+                om.solve(problem, values, avail, **kwargs)
+            assert str(exc.value) == "%s must be at least 1 (got %s)." % (name, kwargs[name])
+
     def test_log_receives_progress_lines(self, example_text):
         lines = []
         problem, values, avail = om.prepare_sheet(example_text)

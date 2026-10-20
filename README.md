@@ -222,12 +222,14 @@ python -m pip install pytest
 python -m pytest -q
 ```
 
-The default run takes about a minute. It covers CSV parsing and round trips, the rank-to-points
-conversion, package validation, the constraint and feasibility checks, `best_response` against
-brute force on tiny problems, a full solve of `preferences_example.csv` at seed 1 (same schedule
-every run, regret below 0.1), the command line, and the GUI's helpers and API. Solves of the
-five-block structure take about 25 s each and are marked `slow`: they are skipped by default and
-run with `python -m pytest -q -m slow` (`-m "slow or not slow"` runs everything).
+The default run takes two to three minutes. It covers CSV parsing and round trips, the
+rank-to-points conversion, package validation, the constraint and feasibility checks,
+`best_response` against brute force on tiny problems, full solves of `preferences_example.csv`
+(the same schedule at seeds 1 and 2, regret below 0.1), the tie-break rule, non-responders and
+warnings, the carry-over formula, the search's starting point, the command line, the GUI's
+helpers and API, and the hosted app. Solves of the five-block structure take about 30 s each
+and are marked `slow`: they are skipped by default and run with `python -m pytest -q -m slow`
+(`-m "slow or not slow"` runs everything).
 
 ## Files
 

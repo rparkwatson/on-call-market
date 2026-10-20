@@ -116,8 +116,10 @@ def sheet_payload(problem):
         "shifts": [{"code": sh["code"], "label": sh["label"], "time": sh["time"], "hours": sh["hours"]} for sh in problem.shifts],
         "slots": [{"id": s["id"], "date": s["date"].isoformat(), "weekday": s["date"].strftime("%a"), "short": om.fmt_date(s["date"]),
                    "day": s["day"], "code": s["code"], "label": s["label"], "time": s["time"], "hours": s["hours"],
-                   "gap_before": s["day"] > 0 and (problem.dates[s["day"]] - problem.dates[s["day"] - 1]).days > 1}
-                  for s in problem.slots],
+                   # only the day's first slot, so the page inserts one "no coverage" row per gap
+                   "gap_before": j == problem.slots_by_day[s["day"]][0] and s["day"] > 0
+                   and (problem.dates[s["day"]] - problem.dates[s["day"] - 1]).days > 1}
+                  for j, s in enumerate(problem.slots)],
         "packages": package_descriptions(problem),
     }
 

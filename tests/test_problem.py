@@ -67,12 +67,13 @@ class TestProblem:
         assert "packages" in str(exc.value)
         assert str(exc.value).startswith("Category %r has" % category)
 
-    @pytest.mark.xfail(strict=True, reason="validate() only checks per-category ranges; for the five-block "
-                                           "structure 10 days (50 slots) fits the ranges although the package "
-                                           "totals add up to 45 (found by T1; reported, not fixed)")
-    def test_ten_days_are_rejected_for_single_blocks_too(self):
-        with pytest.raises(om.SchedulingError):
-            default_problem("single", days=10)
+    @pytest.mark.parametrize("days, slots", [(10, 50), (8, 40)])
+    def test_wrong_number_of_days_is_rejected_for_single_blocks_too(self, days, slots):
+        # the per-category ranges are wide enough to hide this; the package totals are not (found by T1)
+        with pytest.raises(om.SchedulingError) as exc:
+            default_problem("single", days=days)
+        assert str(exc.value).startswith(
+            "There are %d slots but the packages add up to between 45 and 45 shifts in total." % slots)
 
     def test_unknown_category_in_a_package_override(self):
         packages = {"p": {"count": 7, "cats": {"nope": [1, 1]}}}

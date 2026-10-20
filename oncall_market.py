@@ -220,6 +220,12 @@ class Problem:
                 raise SchedulingError(
                     "Category %r has %d slots but the packages call for between %d and %d. The built-in packages "
                     "assume 9 weekdays; for other periods supply your own packages (see README.md)." % (cat, self.supply[ci], lo, hi))
+        lo = sum(p["count"] * p["total"][0] for p in self.packages.values())
+        hi = sum(p["count"] * p["total"][1] for p in self.packages.values())
+        if not (lo <= len(self.slots) <= hi):  # the category ranges can be wide enough to hide this (five blocks)
+            raise SchedulingError(
+                "There are %d slots but the packages add up to between %d and %d shifts in total. The built-in packages "
+                "assume 9 weekdays; for other periods supply your own packages (see README.md)." % (len(self.slots), lo, hi))
 
     # -- a person's best response to prices -------------------------------------------
     def _package_tables(self, pkg):
@@ -239,16 +245,17 @@ class Problem:
         return self._ptab[pkg]
 
     def _day_options(self, i, pkg, d, avail_i):
-        """Ways person i can spend day d under package pkg (cached; independent of prices)."""
+        """Ways a person can spend day d under package pkg, given the day's slots they are available
+        for (cached by that availability, so a changed matrix is honoured; independent of prices)."""
         if not hasattr(self, "_dopt"):
             self._dopt = {}
-        key = (i, pkg, d)
+        today = [j for j in self.slots_by_day[d] if avail_i[j]]
+        key = (pkg, d, tuple(today))
         if key in self._dopt:
             return self._dopt[key]
         mult, S, decoded, valid_cache = self._package_tables(pkg)
         maxs = self.packages[pkg]["max"]
         C = len(self.cats)
-        today = [j for j in self.slots_by_day[d] if avail_i[j]]
         options = [((), 0, False, False, range(S))]
         for size in range(1, min(self.max_per_day, len(today)) + 1):
             for combo in itertools.combinations(today, size):
@@ -401,7 +408,15 @@ def parse_preferences(text):
     header = [h.strip() for h in rows[0]]
     if header[:6] != FIXED_COLUMNS:
         raise SchedulingError("Unexpected header; expected the first six columns to be %s" % ", ".join(FIXED_COLUMNS))
-    people = [h for h in header[6:] if h]
+    people = header[6:]
+    while people and not people[-1]:
+        people.pop()  # trailing blank columns (spreadsheet padding) are harmless
+    for k, name in enumerate(people):
+        if not name:  # a blank column in the middle would silently shift every later person's cells
+            before = people[k - 1] if k else FIXED_COLUMNS[-1]
+            after = next(h for h in people[k + 1:] if h)
+            raise SchedulingError("Header column %d (between %r and %r) is blank: every person column needs a name, "
+                                  "and blank columns are only allowed at the end of the header." % (7 + k, before, after))
     if not people:
         raise SchedulingError("No person columns found in the preferences file.")
     slot_rows = []
@@ -1057,6 +1072,9 @@ def solve(problem, values, avail, market_roles=True, roles=None, iters=400, step
     The seed drives only the assignment search (the annealing restarts): the point values,
     the clearing prices and the tie-break rule do not depend on it."""
     log = log or (lambda s: None)
+    for name, value in (("iters", iters), ("sa_iters", sa_iters), ("restarts", restarts)):
+        if int(value) < 1:
+            raise SchedulingError("%s must be at least 1 (got %s)." % (name, value))
     if not market_roles:
         validate_roles(problem, roles)
     check_feasibility(problem, values, avail)
@@ -1512,13 +1530,37 @@ def parse_roles_map(text, people, packages):
     return roles
 
 
+def read_text_file(path, what):
+    """A user-supplied file as text; an unreadable file is a SchedulingError, not a traceback."""
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            return f.read()
+    except OSError as e:
+        raise SchedulingError("Cannot read the %s file %s: %s." % (what, path, e.strerror or e))
+
+
+def load_json_file(path, what):
+    try:
+        return json.loads(read_text_file(path, what))
+    except ValueError as e:
+        raise SchedulingError("The %s file %s is not valid JSON: %s." % (what, path, e))
+
+
+def load_budgets_file(path):
+    """{person: budget} from a CSV with columns person,budget."""
+    budgets = {}
+    for row in csv.DictReader(io.StringIO(read_text_file(path, "budgets"))):
+        try:
+            budgets[row["person"].strip()] = float(row["budget"])
+        except (KeyError, TypeError, ValueError):
+            raise SchedulingError("The budgets file %s needs the columns person,budget with a number in budget." % path)
+    return budgets
+
+
 def build_problem_from_args(args, people):
     skip = {date.fromisoformat(s) for s in (args.skip or [])}
     dates = weekdays(date.fromisoformat(args.start), args.days, skip)
-    packages = None
-    if getattr(args, "packages", None):
-        with open(args.packages, encoding="utf-8") as f:
-            packages = json.load(f)
+    packages = load_json_file(args.packages, "packages") if getattr(args, "packages", None) else None
     return Problem(args.structure, dates, people, packages)
 
 
@@ -1541,18 +1583,9 @@ def cmd_demo(args):
 
 
 def cmd_solve(args):
-    with open(args.preferences, encoding="utf-8-sig") as f:
-        text = f.read()
-    packages = None
-    if args.packages:
-        with open(args.packages, encoding="utf-8") as f:
-            packages = json.load(f)
-    budgets = None
-    if args.budgets:
-        budgets = {}
-        with open(args.budgets, newline="", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                budgets[row["person"].strip()] = float(row["budget"])
+    text = read_text_file(args.preferences, "preferences")
+    packages = load_json_file(args.packages, "packages") if args.packages else None
+    budgets = load_budgets_file(args.budgets) if args.budgets else None
     # Same path as solve_sheet(): prepare_sheet -> solve -> solution_dict, split here only so the
     # problem size can be printed and --roles-map parsed (with its own messages) before solving.
     problem, values, avail = prepare_sheet(text, structure=args.structure, mode=args.mode, packages=packages,
