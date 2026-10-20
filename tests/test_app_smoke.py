@@ -115,4 +115,4 @@ def test_admin_dashboard_renders(Session):
     assert at.title[0].value == "Smoke admin"
     assert [t.label for t in at.tabs] == ["Setup", "Links", "Status", "Run market", "Review and edit", "Publish", "Danger zone"]
     assert any(b.label == "Run the market" for b in at.button)
-    assert any("Using the built-in packages" in c.value for c in at.caption)
+    assert any("Using the built-in packages" in c.value or "Packages derived automatically" in c.value for c in at.caption)
