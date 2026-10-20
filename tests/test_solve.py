@@ -10,9 +10,10 @@ import oncall_market as om
 from tests.helpers import check_rules, check_schedule, default_problem
 
 SOLUTION_KEYS = {"structure", "people", "dates", "schedule", "summary", "prices", "package_prices",
-                 "cleared", "rounds", "max_regret", "market_roles", "report"}
+                 "cleared", "rounds", "max_regret", "market_roles", "report", "alternatives", "warnings",
+                 "prices_supported"}
 SUMMARY_KEYS = ["person", "package", "shifts", "hours", "points_received", "pct_of_ideal", "net_price",
-                "next_budget_suggestion", "violations", "slots"]
+                "next_budget_suggestion", "violations", "slots", "responded"]
 FIXED_ROLES = {"Person A": "heavy", "Person B": "heavy", "Person C": "heavy", "Person D": "light_evenings",
                "Person E": "light_evenings", "Person F": "light_evenings", "Person G": "light_days"}
 
@@ -54,14 +55,27 @@ class TestExampleEndToEnd:
 
     def test_regret_is_below_a_tenth_of_a_point(self, example_solution):
         assert 0.0 <= example_solution["max_regret"] < 0.1
+        assert example_solution["prices_supported"] is True
+        assert "indicative only" not in example_solution["report"]
         if not example_solution["cleared"]:
             assert "maximum regret of %.2f points" % example_solution["max_regret"] in example_solution["report"]
 
     def test_summary_figures_are_consistent(self, example_solution):
         for row in example_solution["summary"]:
-            assert row["next_budget_suggestion"] == pytest.approx(100.0 - row["net_price"], abs=0.051)
+            # damped carry-over: half of the compensation (minus the net price), within 75 to 125
+            assert row["next_budget_suggestion"] == pytest.approx(100.0 - 0.5 * row["net_price"], abs=0.051)
+            assert 75.0 <= row["next_budget_suggestion"] <= 125.0
             assert 0.0 <= row["pct_of_ideal"] <= 100.0
             assert row["violations"] == 0
+
+
+class TestCarryOver:
+    @pytest.mark.parametrize("net_price, budget", [
+        (0.0, 100.0), (-10.0, 105.0), (10.0, 95.0), (21.24, 89.4), (-21.24, 110.6),
+        (-50.0, 125.0), (-60.0, 125.0), (50.0, 75.0), (60.0, 75.0),
+    ])
+    def test_next_budget_is_damped_and_capped(self, net_price, budget):
+        assert om.next_budget(net_price) == budget
 
     def test_other_seeds_also_give_valid_schedules(self, example_text):
         problem, values, avail = om.prepare_sheet(example_text, seed=2)
@@ -144,6 +158,13 @@ class TestSolveSheetInputs:
         assert list(problem.packages) == ["all"]
         assert problem.max_per_day == 2
 
+    def test_iteration_counts_must_be_at_least_one(self, example_text):
+        problem, values, avail = om.prepare_sheet(example_text)
+        for kwargs, name in ((dict(iters=0), "iters"), (dict(sa_iters=0), "sa_iters"), (dict(restarts=-1), "restarts")):
+            with pytest.raises(om.SchedulingError) as exc:
+                om.solve(problem, values, avail, **kwargs)
+            assert str(exc.value) == "%s must be at least 1 (got %s)." % (name, kwargs[name])
+
     def test_log_receives_progress_lines(self, example_text):
         lines = []
         problem, values, avail = om.prepare_sheet(example_text)
@@ -188,6 +209,9 @@ class TestDemo:
     def test_demo_five_blocks_solves_without_violations(self):
         sol = self.demo_solution("single")
         assert sorted(r["hours"] for r in sol["summary"]) == [12.0] * 4 + [14.0] * 3
+        # the five-block prices cannot be made to support the schedule (README): say so honestly
+        assert sol["prices_supported"] == (sol["cleared"] or sol["max_regret"] <= om.REGRET_SUPPORTED)
+        assert ("indicative only" in sol["report"]) == (not sol["prices_supported"])
 
 
 class TestEntryPointMatchesCommandLine:

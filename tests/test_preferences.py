@@ -101,13 +101,16 @@ class TestParsePreferences:
             om.parse_preferences(HEADER + "\n")
         assert str(exc.value) == "No person columns found in the preferences file."
 
-    @pytest.mark.xfail(strict=True, reason="a blank header column in the middle of the sheet shifts every "
-                                           "later column (found by T1; reported, not fixed)")
-    def test_blank_middle_header_column_keeps_alignment(self):
+    def test_blank_middle_header_column_is_an_error_naming_the_column(self):
+        # used to shift every later person's cells silently (found by T1)
         text = HEADER + ",Ann,,Bob\n2026-11-02_M,2026-11-02,Mon,M,08:00-12:00,4.0,1,,2\n"
-        people, rows = om.parse_preferences(text)
-        assert people == ["Ann", "Bob"]
-        assert rows[0]["cells"] == ["1", "2"]
+        with pytest.raises(om.SchedulingError) as exc:
+            om.parse_preferences(text)
+        assert str(exc.value) == ("Header column 8 (between 'Ann' and 'Bob') is blank: every person column needs a name, "
+                                  "and blank columns are only allowed at the end of the header.")
+        with pytest.raises(om.SchedulingError) as exc:
+            om.parse_preferences(HEADER + ",,,Bob\n")
+        assert str(exc.value).startswith("Header column 7 (between 'hours' and 'Bob') is blank")
 
 
 class TestInferStructure:

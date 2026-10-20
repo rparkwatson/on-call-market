@@ -57,8 +57,9 @@ python oncall_market.py solve preferences_example.csv
 | `--roles market` / `--roles fixed --roles-map "Ana=heavy,Ben=light_evenings,..."` | Let the market decide who takes which package (default), or fix it. |
 | `--max-per-day 2` | Allow someone two shifts on the same day (default 1). |
 | `--budgets budgets.csv` | Give some people more than 100 points (see "Carrying fairness across cycles"). |
+| `--min-ranks 6` | List under WARNINGS anyone who ranked fewer than 6 slots (a report, not an error). |
 | `--packages packages.json` | Replace the built-in packages (see "Changing the system"). |
-| `--seed 1` | Change the tie-breaking / search seed. |
+| `--seed 1` | Change the search seed. Ties between equally good schedules are broken by a fixed rule (see "How the market works"), so the schedule normally does not change with the seed. |
 
 ## Filling in the sheet
 
@@ -98,6 +99,14 @@ impossible (the program will tell you which day is short-handed).
    remaining **regret** — how much better anyone could do by switching at the final prices.
    Values below about 0.1 points mean the prices are, for practical purposes, true clearing
    prices.
+5. **Ties.** Several schedules often satisfy the same total of preference points (for example
+   two people who are equally happy either way, one of whom must take the 14-hour package). The
+   program collects every schedule it finds whose total is within 0.05 points of the best, lists
+   them in the report ("Ties: 3 equivalent schedules ...") and in `solve_sheet`'s `alternatives`,
+   and picks one by a fixed rule: the highest minimum "% of ideal" across people, then the
+   smallest spread of net price, then the fewest late shifts for the person with the most hours,
+   then the first in slot order. The rule does not depend on the random seed, so the same sheet
+   gives the same schedule whatever `--seed` is used; the seed only steers the search.
 
 What the numbers in the output mean:
 
@@ -108,6 +117,14 @@ What the numbers in the output mean:
   were compensated for taking unpopular ones).
 - **package prices** — the market's valuation of the packages themselves; a negative price on
   `heavy` means people had to be paid to take the 14-hour package.
+- **responded** — `False` for a column with no ranks and no X's. Such a person is scheduled as
+  fully available with no preferences, but their % of ideal, net price and next budget would be
+  nothing but tie-break noise, so they are shown as `n/a` and the report says "no preferences
+  submitted". (The hosted app excludes non-responders from the cycle instead.) % of ideal is
+  also `n/a` for someone who only wrote X's.
+- **WARNINGS** — listed at the end of the people section (and in `solve_sheet`'s `warnings`):
+  non-responders, and with `--min-ranks N` anyone who ranked fewer than N slots. They never stop
+  the solve; the hosted app enforces the minimum, the solver only reports it.
 
 ## The fairness system that is built in
 
@@ -134,20 +151,45 @@ Built-in packages per structure:
 | single | heavy7 | 3 | one of each block + two extra midday blocks | 14 |
 | single | light6 | 4 | one of each block + one extra 8 am or 6 pm block | 12 |
 
+## The five-block structure
+
+With five separate 2-hour blocks a day the assignment search is much harder than with two or
+three shifts (45 slots, five categories, tight packages), and clearing prices can only support
+an assignment that is truly welfare-maximising: the gap between the best assignment found and
+the market's upper bound (the smallest dual value seen while adjusting prices) is exactly the
+sum of everyone's regrets. On the demo sheet (`demo --structure single`) the price loop never
+reduced the regret below about 6 points whatever the step size or number of rounds, because
+the annealing restarts themselves spread over 20 to 30 points and the best of them sat 8 points
+below the bound. Every restart therefore now starts from the market's own demand at the
+clearing prices (each person's best bundle, repaired to fit the packages) and cools from a lower
+temperature. On the demo the best total rose from 298 to 303 points against a bound of 305 and
+the regret fell from 5.7 to about 0.6 points, in 20 s instead of 26 s; the three-shift example
+keeps its total (316.4 points) and regret (0.03) in 7 s as before. A regret above
+0.5 points still means no price vector makes the schedule everyone's own best choice, so the
+report then calls the prices "indicative only" and `solve_sheet` returns `prices_supported:
+false`: the schedule is the best found, the prices show who is compensated and for what, but
+someone could gain a little by switching at them. Different seeds can also still land on
+different near-optimal five-block schedules (totals 303.05 and 303.19 on the demo).
+
 ## Carrying fairness across cycles
 
 If this rotation repeats, the simplest fix for a one-off imbalance is to run the next cycle with
 `--roles fixed` and give the heavy package to different people. The market offers a finer tool:
-`summary.csv` has a `next_budget_suggestion` column equal to `100 − net price`. Someone who was
-compensated this cycle (negative net price) gets a larger budget next cycle, so their preferences
-carry more weight; someone who got the popular slots gets a smaller one. Save those numbers to a
-file with columns `person,budget` and pass it with `--budgets`.
+`summary.csv` has a `next_budget_suggestion` column, a damped carry-over of this cycle's net
+price: `100 + 0.5 × compensation`, where the compensation is minus the net price, kept between
+75 and 125 and rounded to 0.1. Someone who was compensated this cycle (negative net price) gets
+a larger budget next cycle, so their preferences carry more weight; someone who got the popular
+slots gets a smaller one. Carrying only half, with a cap, stops one cycle's prices from swinging
+the next one too far: in a probe, giving a single person 30 extra points moved three other
+people's satisfaction by 14 to 20 points of ideal. Save those numbers to a file with columns
+`person,budget` and pass it with `--budgets`.
 
 ## Changing the system
 
 **Different dates or headcount.** `template`/`demo` take `--start`, `--days`, `--skip` and
-`--people`. The built-in packages assume 9 days and 7 people; with other numbers the program
-will tell you the packages no longer add up, and you provide your own:
+`--people`. The built-in packages assume 9 days and 7 people; for any other size run
+`python packages.py --structure three --people 6 --days 9` to derive a fair package set
+automatically (see `docs/packages.md`). To override the packages by hand, write a JSON file:
 
 ```json
 {
@@ -180,12 +222,14 @@ python -m pip install pytest
 python -m pytest -q
 ```
 
-The default run takes about a minute. It covers CSV parsing and round trips, the rank-to-points
-conversion, package validation, the constraint and feasibility checks, `best_response` against
-brute force on tiny problems, a full solve of `preferences_example.csv` at seed 1 (same schedule
-every run, regret below 0.1), the command line, and the GUI's helpers and API. Solves of the
-five-block structure take about 25 s each and are marked `slow`: they are skipped by default and
-run with `python -m pytest -q -m slow` (`-m "slow or not slow"` runs everything).
+The default run takes two to three minutes. It covers CSV parsing and round trips, the
+rank-to-points conversion, package validation, the constraint and feasibility checks,
+`best_response` against brute force on tiny problems, full solves of `preferences_example.csv`
+(the same schedule at seeds 1 and 2, regret below 0.1), the tie-break rule, non-responders and
+warnings, the carry-over formula, the search's starting point, the command line, the GUI's
+helpers and API, and the hosted app. Solves of the five-block structure take about 30 s each
+and are marked `slow`: they are skipped by default and run with `python -m pytest -q -m slow`
+(`-m "slow or not slow"` runs everything).
 
 ## Files
 

@@ -80,7 +80,7 @@ class TestSolve:
         assert sched[1][6] in om.DEFAULT_PEOPLE
         float(sched[1][7])
         assert summ[0] == ["person", "package", "shifts", "hours", "points_received", "pct_of_ideal", "net_price",
-                           "next_budget_suggestion", "violations", "slots"]
+                           "next_budget_suggestion", "violations", "slots", "responded"]
         assert [r[0] for r in summ[1:]] == om.DEFAULT_PEOPLE
 
     def test_quiet_stdout_has_the_summary_line_report_and_file_names(self, example_cli):
@@ -122,6 +122,34 @@ class TestSolve:
         packages.write_text('{"heavy": {"count": 6, "cats": {"four": [3, 3], "eve": [1, 1]}}}', encoding="utf-8")
         fails(["solve", example_path, "--packages", str(packages)])
         assert capsys.readouterr().err.startswith("The packages are for 6 people but there are 7.")
+
+    def test_missing_or_bad_files_give_a_clean_error(self, example_path, tmp_path, capsys):
+        missing = str(tmp_path / "nope.csv")
+        fails(["solve", missing])
+        assert capsys.readouterr().err.startswith("Cannot read the preferences file %s: " % missing)
+        fails(["solve", example_path, "--packages", str(tmp_path / "nope.json")])
+        assert capsys.readouterr().err.startswith("Cannot read the packages file ")
+        fails(["solve", example_path, "--budgets", missing])
+        assert capsys.readouterr().err.startswith("Cannot read the budgets file ")
+        bad = tmp_path / "bad.json"
+        bad.write_text("{nope", encoding="utf-8")
+        fails(["solve", example_path, "--packages", str(bad)])
+        assert capsys.readouterr().err.startswith("The packages file %s is not valid JSON: " % bad)
+        budgets = tmp_path / "budgets.csv"
+        budgets.write_text("name,points\nPerson A,130\n", encoding="utf-8")
+        fails(["solve", example_path, "--budgets", str(budgets)])
+        assert capsys.readouterr().err.strip() == ("The budgets file %s needs the columns person,budget with a "
+                                                   "number in budget." % budgets)
+        fails(["template", "--out", str(tmp_path / "t.csv"), "--packages", str(tmp_path / "nope.json")])
+        assert capsys.readouterr().err.startswith("Cannot read the packages file ")
+
+    def test_iteration_counts_must_be_at_least_one(self, example_path, capsys):
+        fails(["solve", example_path, "--iters", "0"])
+        assert capsys.readouterr().err.strip() == "iters must be at least 1 (got 0)."
+        fails(["solve", example_path, "--sa-iters", "0"])
+        assert capsys.readouterr().err.strip() == "sa_iters must be at least 1 (got 0)."
+        fails(["solve", example_path, "--restarts", "0"])
+        assert capsys.readouterr().err.strip() == "restarts must be at least 1 (got 0)."
 
     def test_infeasible_sheet_reports_the_short_handed_day(self, example_text, tmp_path, capsys):
         people, rows = om.parse_preferences(example_text)

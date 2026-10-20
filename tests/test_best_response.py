@@ -78,8 +78,8 @@ def test_dynamic_programme_matches_brute_force(name):
     checked = 0
     for trial in range(6):
         rng = random.Random(1000 * len(name) + trial)
-        # A fresh Problem per availability pattern: Problem caches each person's day options
-        # by (person, package, day) and does not notice a changed availability matrix.
+        # A fresh Problem per availability pattern (not required since the day-option cache became
+        # availability-aware, but it keeps the trials independent).
         problem = build(structure, dates, max_per_day, packages)
         n, m = len(problem.people), len(problem.slots)
         avail = [[rng.random() > 0.25 for _ in range(m)] for _ in range(n)]
@@ -148,22 +148,21 @@ class TestRules:
         v, bundle = p.best_response(0, "p", prices, values, [[True] * 4])
         assert bundle == [0]  # one M is required; the L shifts would each lose 2 points
         assert v == 5.0
-        # A fresh Problem for a different availability matrix: Problem caches each person's day
-        # options by (person, package, day) and would otherwise still offer slot 0.
-        p = self.one_person("two", [MON, TUE], {"M": [1, 1], "L": [0, 1]}, [1, 2])
+        # the same Problem with a different availability matrix (the day-option cache follows it)
         v, bundle = p.best_response(0, "p", prices, values, [[False, True, True, True]])
         assert bundle == [2]
         assert v == 3.0
 
-    def test_day_options_are_cached_per_person_package_and_day_not_per_availability(self):
-        """Documents the trap: one Problem instance must not be reused with a changed availability
-        matrix (every front end builds a fresh Problem per solve, so this never bites in practice)."""
+    def test_day_options_follow_a_changed_availability_matrix(self):
+        """One Problem instance may be reused with a different availability matrix: the day-option
+        cache is keyed on the slots the person is available for that day (T1 found it keyed on the
+        person only, which served stale options)."""
         p = self.one_person("two", [MON, TUE], {"M": [1, 1], "L": [0, 1]}, [1, 2])
         values = [[5.0, 1.0, 5.0, 1.0]]
         assert p.best_response(0, "p", [0.0] * 4, values, [[True] * 4]) == (6.0, [0, 3])
-        assert p.best_response(0, "p", [0.0] * 4, values, [[False, True, True, True]]) == (6.0, [0, 3])  # stale
-        fresh = self.one_person("two", [MON, TUE], {"M": [1, 1], "L": [0, 1]}, [1, 2])
-        assert fresh.best_response(0, "p", [0.0] * 4, values, [[False, True, True, True]]) == (5.0, [2])
+        assert p.best_response(0, "p", [0.0] * 4, values, [[False, True, True, True]]) == (5.0, [2])
+        assert p.best_response(0, "p", [0.0] * 4, values, [[True] * 4]) == (6.0, [0, 3])
+        assert p.best_response(0, "p", [0.0] * 4, values, [[False] * 4]) == (None, None)
 
     def test_package_minimums_force_a_loss_making_slot(self):
         p = self.one_person("two", [MON, TUE], {"M": [1, 1], "L": [1, 1]}, [2, 2])

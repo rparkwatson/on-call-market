@@ -77,9 +77,9 @@ class TestCellHelpers:
         assert payload["slots"][0] == {"id": "2026-11-02_M", "date": "2026-11-02", "weekday": "Mon", "short": "Mon Nov 2",
                                        "day": 0, "code": "M", "label": "8-12", "time": "08:00-12:00", "hours": 4.0,
                                        "gap_before": False}
-        # gap_before is set on every slot of a day that follows a gap, not only the day's first slot
+        # gap_before marks only the first slot of a day that follows a gap: one "no coverage" row per gap
         gaps = [s["id"] for s in payload["slots"] if s["gap_before"]]
-        assert gaps == ["2026-11-09_" + c for c in "MAE"] + ["2026-11-12_" + c for c in "MAE"]
+        assert gaps == ["2026-11-09_M", "2026-11-12_M"]
         assert payload["packages"] == [
             {"name": "heavy", "count": 3, "contents": "3 x M/A, 1 x E", "hours": 14.0},
             {"name": "light_evenings", "count": 3, "contents": "2 x M/A, 2 x E", "hours": 12.0},
