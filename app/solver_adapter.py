@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import csv
 import importlib
+import inspect
 import io
 import json
 from collections import Counter
@@ -25,7 +26,7 @@ from datetime import date, timedelta
 import oncall_market as om
 from oncall_market import prepare_sheet, solve_sheet, solution_dict, schedule_csv_text, summary_csv_text  # noqa: F401
 
-DEFAULT_SEEDS = (1, 2, 3)
+DEFAULT_SEEDS = (1,)       # run_market solves once; the tuple stays for callers that still pass seeds
 EQUIVALENT_POINTS = 0.05   # outcomes whose total points are within this are shown as equivalent
 REGRET_OK = 0.1            # README: below this the prices are as good as exact clearing prices
 
@@ -228,21 +229,30 @@ def exact_point_values(problem, text, mode, budgets):
 
 
 def status_line(solution):
+    """How the market ended, in one line: the clearing status, whether the prices only
+    indicate, a rule-violation warning and the solver's own warnings (min_ranks)."""
+    supported = solution.get("prices_supported", True) is not False
     if solution["cleared"]:
         status = ("The market cleared exactly in %d rounds: everyone holds the bundle they would pick for "
                   "themselves at these prices." % solution["rounds"])
-    else:
+    elif supported:
         status = ("Prices support this assignment with a maximum regret of %.2f points "
                   "(0 = exact equilibrium; under %.1f is as good as exact)." % (solution["max_regret"], REGRET_OK))
+    else:
+        status = ("The prices leave a maximum regret of %.2f points (0 = exact equilibrium; under %.1f is as "
+                  "good as exact). Prices are indicative only: the regret exceeds %g points."
+                  % (solution["max_regret"], REGRET_OK, om.REGRET_SUPPORTED))
     if any(r["violations"] for r in solution["summary"]):
         status += (" WARNING: the best schedule found still breaks a rule - usually the X's leave a day "
                    "short-handed. Allow 2 shifts per day or ask for fewer X's.")
+    for warning in solution.get("warnings") or []:
+        status += " WARNING: " + warning
     return status
 
 
 def candidate_from_solution(solution, seed):
     """A JSON-serialisable candidate outcome: the solve_sheet dict plus the owner list, the
-    per-person rows the organiser compares, and a status line."""
+    per-person rows the organiser compares, the solver's warnings and a status line."""
     people = solution["people"]
     index = {p: i for i, p in enumerate(people)}
     owner = [index[r["person"]] for r in solution["schedule"]]
@@ -259,18 +269,58 @@ def candidate_from_solution(solution, seed):
         "schedule": solution["schedule"], "summary": solution["summary"], "person_rows": person_rows,
         "prices": solution["prices"], "package_prices": solution["package_prices"],
         "cleared": solution["cleared"], "rounds": solution["rounds"], "max_regret": solution["max_regret"],
+        "prices_supported": solution.get("prices_supported", True) is not False,
         "market_roles": solution["market_roles"], "report": solution["report"],
+        "warnings": list(solution.get("warnings") or []),
         "status": status_line(solution), "violations": sum(r["violations"] for r in solution["summary"]),
     }
 
 
+def _result_at_prices(source, roles, owner):
+    """An om.solve()-shaped result: these roles (one per person, sheet order) and owners (person
+    index per slot) valued at the prices, rounds, regret and clearing status of `source`, a
+    solve_sheet dict or a candidate.  Used for the equivalent alternatives of a run and for
+    hand edits, so that every schedule is compared at the same prices."""
+    result = {"roles": list(roles), "owner": list(owner),
+              "prices": [source["prices"][r["slot_id"]] for r in source["schedule"]],
+              "pkg_prices": dict(source["package_prices"] or {}),
+              "cleared": source["cleared"], "rounds": source["rounds"],
+              "max_regret": source["max_regret"], "market_roles": bool(source["market_roles"])}
+    if source.get("prices_supported") is not None:
+        result["prices_supported"] = bool(source["prices_supported"])
+    return result
+
+
+def alternative_result(solution, alt):
+    """The result for one entry of solution["alternatives"], at the solution's prices."""
+    people = solution["people"]
+    index = {p: i for i, p in enumerate(people)}
+    return _result_at_prices(solution, [alt["roles"][p] for p in people], [index[p] for p in alt["owner"]])
+
+
+def _with_min_ranks(function, kwargs, min_ranks):
+    """kwargs plus min_ranks when the cycle has one and `function` takes that keyword."""
+    if min_ranks is None:
+        return kwargs
+    params = inspect.signature(function).parameters
+    if "min_ranks" in params or any(p.kind == p.VAR_KEYWORD for p in params.values()):
+        return dict(kwargs, min_ranks=int(min_ranks))
+    return kwargs
+
+
 def run_market(cycle, participants, submissions, packages, seeds=DEFAULT_SEEDS, log=None):
-    """Solve once per seed for the responders and return the distinct outcomes.
+    """Solve once for the responders and return one candidate per welfare-equivalent schedule.
 
     cycle: a repo cycle dict; participants: repo participant dicts (name, budget);
     submissions: {name: cells}; packages: the dict get_packages() returned.
-    Returns {"candidates": [...best first...], "responders": [names], "excluded": [names],
-             "packages": packages, "budgets": {...}, "text": preferences CSV text}.
+    seeds: kept for compatibility; only the first seed is used.  The point values and the
+    clearing prices do not depend on the seed, and one solve reports every equivalent
+    schedule it found in solution["alternatives"], so re-solving with other seeds adds nothing.
+    Returns {"candidates": [the market's choice first, then the equivalent alternatives in the
+             solver's order], "responders": [names], "excluded": [names], "packages": packages,
+             "budgets": {...}, "text": preferences CSV text}.
+    Every candidate is valued at the same prices (the market's); its "warnings" and
+    "prices_supported" come from the solver and are repeated in its status line.
     Raises om.SchedulingError for anything the organiser has to fix."""
     responders, excluded = split_responders(participants, submissions)
     if not responders:
@@ -278,28 +328,30 @@ def run_market(cycle, participants, submissions, packages, seeds=DEFAULT_SEEDS, 
     people = [p["name"] for p in responders]
     budgets = budgets_of(responders)
     text = sheet_text(cycle, people, submissions)
+    seed = int(seeds[0]) if seeds else 1
     kwargs = dict(structure=cycle["structure"], mode=cycle["mode"], packages=packages,
-                  max_per_day=int(cycle["max_per_day"]), budgets=budgets)
-    problem, _, _ = prepare_sheet(text, seed=1, **kwargs)
+                  max_per_day=int(cycle["max_per_day"]), budgets=budgets, seed=seed)
+    min_ranks = cycle.get("min_ranks")
+    problem, values, avail = prepare_sheet(text, **_with_min_ranks(prepare_sheet, kwargs, min_ranks))
     exact = exact_point_values(problem, text, cycle["mode"], budgets)
-    by_owner = {}
-    for seed in seeds:
-        if log:
-            log("seed %d ..." % seed)
-        solution = solve_sheet(text, seed=int(seed), log=log, **kwargs)
-        cand = candidate_from_solution(solution, int(seed))
+    if log:
+        log("Solving (seed %d) ..." % seed)
+    solution = solve_sheet(text, log=log, **_with_min_ranks(solve_sheet, kwargs, min_ranks))
+    chosen = ([r["person"] for r in solution["schedule"]], {r["person"]: r["package"] for r in solution["summary"]})
+    solutions = [solution]
+    for alt in solution.get("alternatives") or []:
+        if alt.get("chosen") or (list(alt["owner"]), dict(alt["roles"])) == chosen:
+            continue
+        solutions.append(solution_dict(problem, values, avail, alternative_result(solution, alt)))
+    candidates = []
+    for k, sol in enumerate(solutions):
+        cand = candidate_from_solution(sol, seed)
         cand["total_points"] = round(sum(exact[cand["owner"][j]][j] for j in range(len(cand["owner"]))), 3)
-        key = tuple(cand["owner"])
-        if key in by_owner:
-            by_owner[key]["seeds"].append(int(seed))
-        else:
-            by_owner[key] = cand
-    candidates = sorted(by_owner.values(), key=lambda c: (-c["total_points"], c["seeds"][0]))
-    best = candidates[0]["total_points"]
-    for k, cand in enumerate(candidates):
+        cand["label"] = "Outcome 1 (the market's choice)" if k == 0 else "Outcome %d (equivalent alternative)" % (k + 1)
+        candidates.append(cand)
+    best = max(c["total_points"] for c in candidates)
+    for cand in candidates:
         cand["equivalent_to_best"] = (best - cand["total_points"]) <= EQUIVALENT_POINTS
-        cand["label"] = "Outcome %d (seed%s %s)" % (k + 1, "s" if len(cand["seeds"]) > 1 else "",
-                                                   ", ".join(str(s) for s in cand["seeds"]))
     return {"candidates": candidates, "responders": people, "excluded": excluded, "packages": packages,
             "budgets": budgets or {}, "text": text}
 
@@ -310,7 +362,7 @@ def run_market(cycle, participants, submissions, packages, seeds=DEFAULT_SEEDS, 
 
 class Context:
     """The problem, point values and availability behind a candidate, rebuilt from the
-    stored data (same seed, so the values are identical to the run's)."""
+    stored data (the point values do not depend on the seed, so they are the run's)."""
 
     def __init__(self, cycle, responders, submissions, packages, seed=1):
         self.people = [p["name"] for p in responders]
@@ -329,13 +381,7 @@ def build_context(cycle, responders, submissions, packages, seed=1):
 
 def result_for_owner(candidate, owner):
     """An om.solve()-shaped result for the candidate's prices with a (possibly edited) owner list."""
-    people = candidate["people"]
-    slot_ids = [r["slot_id"] for r in candidate["schedule"]]
-    return {"roles": [candidate["roles"][p] for p in people], "owner": list(owner),
-            "prices": [candidate["prices"][sid] for sid in slot_ids],
-            "pkg_prices": dict(candidate["package_prices"] or {}),
-            "cleared": candidate["cleared"], "rounds": candidate["rounds"],
-            "max_regret": candidate["max_regret"], "market_roles": bool(candidate["market_roles"])}
+    return _result_at_prices(candidate, [candidate["roles"][p] for p in candidate["people"]], owner)
 
 
 def solution_for_owner(ctx, candidate, owner):
