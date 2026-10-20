@@ -1,6 +1,6 @@
-"""The solver adapter: sheet building, the three package branches (T2 seam), running the
-market on the example data and checking it against the CLI path, the exclusion rule, edits
-and the CSV texts."""
+"""The solver adapter: sheet building, the three package branches, running the market on the
+example data (one solve, one candidate per welfare-equivalent schedule) and checking it
+against the CLI path, the solver's warnings, the exclusion rule, edits and the CSV texts."""
 
 import copy
 import random
@@ -17,7 +17,7 @@ from app import solver_adapter as sa
 
 
 def _fake_packages_module():
-    """What T2's packages.py will offer, for 6 or 7 people over 9 weekdays in the three-shift structure."""
+    """A stand-in for packages.py: packages for 6 or 7 people over 9 weekdays in the three-shift structure."""
     def derive_packages(structure, n_people, days, max_per_day=1):
         assert structure == "three" and days == 9
         if n_people == 7:
@@ -125,26 +125,44 @@ def test_get_packages_override_json(no_packages_module):
 # running the market on the example (one solve, shared by several checks)
 # ---------------------------------------------------------------------------
 
+# Person D's example column ranks 5 slots, below the app's default minimum of 6 for the
+# three-shift structure; the form would refuse it, the helper loads it through the repo, and
+# the solver reports it (never an error).
+EXAMPLE_WARNING = "Person D ranked 5 slots; the minimum is 6."
+
+
 @pytest.fixture(scope="module")
 def example_run(tmp_path_factory):
-    """Cycle with all seven example columns, closed, solved with seed 1 through the adapter."""
+    """Cycle with all seven example columns, closed, solved once through the adapter (default
+    seeds).  The solve_sheet dict the run was built from is kept as "solution"."""
     _, _, Session = temp_database(tmp_path_factory.mktemp("adapter"))
     cycle = make_example_cycle(Session, close=True)
     with Session() as s:
         participants = repo.list_participants(s, cycle["id"])
         submissions = repo.submissions_by_name(s, cycle["id"])
     packages = sa.get_packages(cycle["structure"], participants, sa.cycle_dates(cycle))["packages"]
-    outcome = sa.run_market(cycle, participants, submissions, packages, seeds=(1,))
+    seen, real_solve_sheet = [], sa.solve_sheet
+
+    def recording_solve_sheet(text, **kwargs):
+        seen.append(real_solve_sheet(text, **kwargs))
+        return seen[-1]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(sa, "solve_sheet", recording_solve_sheet)
+        outcome = sa.run_market(cycle, participants, submissions, packages)
+    assert len(seen) == 1  # one solve, however many candidates come out of it
     return {"Session": Session, "cycle": cycle, "participants": participants, "submissions": submissions,
-            "packages": packages, "outcome": outcome}
+            "packages": packages, "outcome": outcome, "solution": seen[0]}
 
 
 def test_run_market_example_is_fair_and_supported(example_run):
     outcome = example_run["outcome"]
     assert outcome["excluded"] == [] and outcome["responders"] == om.DEFAULT_PEOPLE
-    assert len(outcome["candidates"]) == 1
+    assert len(outcome["candidates"]) == 3  # see test_run_market_lists_the_equivalent_schedules
     cand = outcome["candidates"][0]
-    assert cand["seeds"] == [1] and cand["equivalent_to_best"] and cand["label"] == "Outcome 1 (seed 1)"
+    assert cand["seeds"] == [1] and cand["equivalent_to_best"] and cand["label"] == "Outcome 1 (the market's choice)"
+    assert cand["prices_supported"] is True and cand["warnings"] == [EXAMPLE_WARNING]
+    assert cand["status"].endswith(" WARNING: " + EXAMPLE_WARNING) and "indicative" not in cand["status"]
     assert cand["max_regret"] < 0.1
     assert cand["violations"] == 0
     assert sorted(r["hours"] for r in cand["person_rows"]) == [12, 12, 12, 12, 14, 14, 14]
@@ -154,6 +172,64 @@ def test_run_market_example_is_fair_and_supported(example_run):
     assert abs(sum(r["points"] for r in cand["person_rows"]) - cand["total_points"]) < 0.5
     assert "SCHEDULE" in cand["report"] and "regret" in cand["status"]
     assert len(cand["schedule"]) == 27 and set(cand["prices"]) == {r["slot_id"] for r in cand["schedule"]}
+
+
+def test_run_market_lists_the_equivalent_schedules(example_run):
+    """The solver reports three welfare-equivalent schedules for the example (the heavy package
+    moves between people, everyone's % of ideal is the same).  The market's choice comes first
+    and the alternatives are valued at its prices."""
+    cands = example_run["outcome"]["candidates"]
+    solution = example_run["solution"]
+    assert len(cands) == 3 == len(solution["alternatives"])
+    assert [c["label"] for c in cands] == ["Outcome 1 (the market's choice)", "Outcome 2 (equivalent alternative)",
+                                           "Outcome 3 (equivalent alternative)"]
+    chosen = next(a for a in solution["alternatives"] if a["chosen"])
+    assert [cands[0]["people"][i] for i in cands[0]["owner"]] == chosen["owner"] == [r["person"] for r in solution["schedule"]]
+    assert all(c["equivalent_to_best"] and c["seeds"] == [1] for c in cands)
+    totals = [c["total_points"] for c in cands]
+    assert max(totals) - min(totals) <= sa.EQUIVALENT_POINTS
+    pct = [[r["pct_of_ideal"] for r in c["person_rows"]] for c in cands]
+    assert pct[0] == pct[1] == pct[2]
+    heavy = [frozenset(p for p, pk in c["roles"].items() if pk == "heavy") for c in cands]
+    assert len(set(heavy)) == 3 and all(len(h) == 3 for h in heavy)
+    for alt, c in zip((a for a in solution["alternatives"] if not a["chosen"]), cands[1:]):
+        assert [c["people"][i] for i in c["owner"]] == alt["owner"] and c["roles"] == alt["roles"]
+        assert c["owner"] != cands[0]["owner"]
+        assert c["prices"] == cands[0]["prices"] and c["package_prices"] == cands[0]["package_prices"]
+        assert (c["cleared"], c["rounds"], c["max_regret"]) == (cands[0]["cleared"], cands[0]["rounds"], cands[0]["max_regret"])
+        assert c["warnings"] == [EXAMPLE_WARNING] and c["prices_supported"] is True
+        assert c["status"].endswith(" WARNING: " + EXAMPLE_WARNING)
+        assert {r["person"]: r["hours"] for r in c["person_rows"]} == alt["hours"]
+        assert len(c["schedule"]) == 27 and len(c["summary"]) == 7 and "SCHEDULE" in c["report"]
+    assert "Ties: 3 equivalent schedules" in cands[0]["report"]
+
+
+def test_run_market_without_alternatives_has_one_candidate(example_run, monkeypatch):
+    """When the solver reports no alternative (or none at all), the solution is the only
+    candidate; extra seeds are accepted but only the first is used."""
+    cycle, participants, submissions, packages = (example_run[k] for k in ("cycle", "participants", "submissions", "packages"))
+    solution = example_run["solution"]
+    only_chosen = [a for a in solution["alternatives"] if a["chosen"]]
+    for faked in (dict(solution, alternatives=only_chosen), dict(solution, alternatives=[]),
+                  {k: v for k, v in solution.items() if k != "alternatives"}):
+        monkeypatch.setattr(sa, "solve_sheet", lambda text, _s=faked, **kwargs: _s)
+        outcome = sa.run_market(cycle, participants, submissions, packages, seeds=(1, 2, 3))
+        assert len(outcome["candidates"]) == 1
+        cand = outcome["candidates"][0]
+        assert cand["label"] == "Outcome 1 (the market's choice)" and cand["equivalent_to_best"]
+        assert cand["seeds"] == [1] and cand["owner"] == example_run["outcome"]["candidates"][0]["owner"]
+
+
+def test_status_line_wording():
+    base = {"cleared": False, "rounds": 800, "max_regret": 0.69, "summary": [{"violations": 0}], "warnings": []}
+    assert sa.status_line(dict(base, prices_supported=True)).startswith(
+        "Prices support this assignment with a maximum regret of 0.69 points")
+    line = sa.status_line(dict(base, prices_supported=False, warnings=["Person A ranked 2 slots; the minimum is 6."]))
+    assert line.startswith("The prices leave a maximum regret of 0.69 points")
+    assert line.split(" WARNING: ")[1:] == ["Prices are indicative only: the regret exceeds 0.5 points.",
+                                           "Person A ranked 2 slots; the minimum is 6."]
+    cleared = sa.status_line({"cleared": True, "rounds": 12, "max_regret": 0.0, "summary": [], "prices_supported": True})
+    assert cleared.startswith("The market cleared exactly in 12 rounds") and "WARNING" not in cleared
 
 
 def test_run_market_matches_the_cli_path(example_run):
@@ -230,6 +306,14 @@ def test_grid_from_schedule(example_run):
     assert len(grid2["rows"]) == 9 and grid2["rows"][7][0] == "no coverage Wed Nov 11"
 
 
+def test_tie_rule_from_report(example_run):
+    cands = example_run["outcome"]["candidates"]
+    assert sa.tie_rule_from_report(cands[0]["report"]) == om.TIE_RULE
+    assert sa.tie_rule_from_report(cands[1]["report"]) is None  # an alternative's report has no Ties line
+    assert sa.tie_rule_from_report("") is None and sa.tie_rule_from_report(None) is None
+    assert sa.tie_rule_from_report("  Ties: none (no other schedule found within 0.05 points of the best).") is None
+
+
 def test_edits_csv_text():
     from datetime import datetime
     text = sa.edits_csv_text([{"created_at": datetime(2026, 10, 30, 9, 5, 0), "description": "Swapped a: X -> Y"}])
@@ -269,6 +353,31 @@ def test_non_responder_excluded_solves_with_packages_module(tmp_path, fake_packa
     assert cand["people"] == people[:6] and "Person G" not in cand["roles"]
     assert sorted(r["hours"] for r in cand["person_rows"]) == [14, 14, 14, 16, 16, 16]
     assert cand["violations"] == 0
+
+
+def test_run_market_warns_when_someone_ranked_too_few(tmp_path):
+    """The form refuses fewer than min_ranks ranks; a column written through the repo bypasses
+    that, and the solver names the person in warnings, repeated in every candidate's status."""
+    _, _, Session = temp_database(tmp_path)
+    people, cells = example_columns()
+    cycle = make_example_cycle(Session, submit=people[:6])
+    few = {slot_id: str(k + 1) for k, slot_id in enumerate(list(cells["Person G"])[:3])}
+    with Session() as s:
+        g = next(p for p in repo.list_participants(s, cycle["id"]) if p["name"] == "Person G")
+        repo.upsert_submission(s, g["id"], few)
+        repo.close_collection(s, cycle["id"])
+        cycle = repo.get_cycle(s, cycle["id"])
+        participants = repo.list_participants(s, cycle["id"])
+        submissions = repo.submissions_by_name(s, cycle["id"])
+    assert cycle["min_ranks"] == 6 and submissions["Person G"] == few
+    packages = sa.get_packages(cycle["structure"], participants, sa.cycle_dates(cycle))["packages"]
+    outcome = sa.run_market(cycle, participants, submissions, packages)
+    assert outcome["excluded"] == [] and outcome["responders"] == people
+    expected = [EXAMPLE_WARNING, "Person G ranked 3 slots; the minimum is 6."]  # sheet order
+    for cand in outcome["candidates"]:
+        assert cand["warnings"] == expected
+        assert cand["status"].endswith(" WARNING: " + expected[0] + " WARNING: " + expected[1])
+        assert "WARNINGS" in cand["report"]
 
 
 def test_run_market_with_nobody_raises(tmp_path):

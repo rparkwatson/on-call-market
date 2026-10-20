@@ -1,18 +1,13 @@
 """Bridge between the stored cycle data and oncall_market.  No Streamlit imports.
 
-Seams for the sibling tasks
----------------------------
-T1 adds om.prepare_sheet / om.solve_sheet / om.solution_dict / om.schedule_csv_text /
-om.summary_csv_text to oncall_market.py.  Until they land, the _compat functions in the
-"T1 seam" section do the same work with the public functions that exist today
-(parse_preferences, Problem, preference_values, solve, build_report), and the getattr lines
-at the end of that section pick up the real functions automatically.  When T1 has landed,
-delete the _compat functions and the getattr lines and import the names from om directly.
+The solver is reached only through oncall_market's library entry point: prepare_sheet,
+solve_sheet and solution_dict (the solve_sheet dict is the one solver interface, see its
+docstring), plus schedule_csv_text and summary_csv_text for the downloads.
 
-T2 adds packages.py with derive_packages(structure, n_people, days, max_per_day=1).
-get_packages() imports it when present (T2 seam), otherwise uses the built-in packages for
-7 people over 9 weekdays, otherwise reports that automatic packages are not available and
-lets the organiser paste a packages JSON.
+Packages come from packages.derive_packages(structure, n_people, days, max_per_day=1) for
+the responders.  When it cannot derive a set for this size, get_packages() reports why and
+the organiser can paste a packages JSON instead (the tests also exercise the built-in
+packages for 7 people over 9 weekdays with the module forced absent).
 
 Non-responders (decision Q6) are excluded: the problem is built for the responders only.
 """
@@ -22,15 +17,16 @@ from __future__ import annotations
 import copy
 import csv
 import importlib
+import inspect
 import io
 import json
-import random
 from collections import Counter
 from datetime import date, timedelta
 
 import oncall_market as om
+from oncall_market import prepare_sheet, solve_sheet, solution_dict, schedule_csv_text, summary_csv_text  # noqa: F401
 
-DEFAULT_SEEDS = (1, 2, 3)
+DEFAULT_SEEDS = (1,)       # run_market solves once; the tuple stays for callers that still pass seeds
 EQUIVALENT_POINTS = 0.05   # outcomes whose total points are within this are shown as equivalent
 REGRET_OK = 0.1            # README: below this the prices are as good as exact clearing prices
 
@@ -119,11 +115,16 @@ def budgets_of(responders):
 
 
 # ---------------------------------------------------------------------------
-# packages (T2 seam)
+# packages
 # ---------------------------------------------------------------------------
 
+PASTE_PACKAGES = ("Paste a packages JSON below (the shape shown under 'Changing the system' in README.md) "
+                  "and save it.")
+
+
 def _derive_packages_function():
-    """T2 seam: packages.derive_packages(structure, n_people, days, max_per_day=1) when present."""
+    """packages.derive_packages(structure, n_people, days, max_per_day=1); None only when the
+    module is absent (the tests force that to reach the built-in packages)."""
     try:
         module = importlib.import_module("packages")
     except ImportError:
@@ -150,9 +151,9 @@ def get_packages(structure, responders, dates, max_per_day=1, override_json=None
     """The packages to solve with, for the RESPONDERS.
 
     Returns {"packages": dict or None, "source": str or None, "message": str}.
-    Order: a pasted override; packages.derive_packages when T2's module is importable; the
-    built-in packages when there are exactly 7 responders and 9 weekdays; otherwise None with
-    a message asking the organiser to paste a packages JSON."""
+    Order: a pasted override; packages.derive_packages (when it raises, its message plus an
+    invitation to paste a packages JSON); without the module, the built-in packages when there
+    are exactly 7 responders and 9 weekdays, otherwise None with the same invitation."""
     names = [p["name"] if isinstance(p, dict) else str(p) for p in responders]
     n, days = len(names), len(dates)
     if override_json:
@@ -170,10 +171,11 @@ def get_packages(structure, responders, dates, max_per_day=1, override_json=None
         try:
             packages = derive(structure, n, days, max_per_day=max_per_day)
         except om.SchedulingError as e:
-            return _no_packages("packages.py could not derive packages for %d people over %d weekdays: %s" % (n, days, e))
+            return _no_packages("packages.py could not derive packages for %d people over %d weekdays: %s %s"
+                                % (n, days, str(e).rstrip(".") + ".", PASTE_PACKAGES))
         err = _check_packages(structure, dates, names, packages, max_per_day)
         if err:
-            return _no_packages("packages.py returned packages that do not fit this cycle: %s" % err)
+            return _no_packages("packages.py returned packages that do not fit this cycle: %s %s" % (err, PASTE_PACKAGES))
         return {"packages": packages, "source": "packages.py",
                 "message": "Packages derived automatically for %d people over %d weekdays." % (n, days)}
     if n == 7 and days == 9:
@@ -184,9 +186,8 @@ def get_packages(structure, responders, dates, max_per_day=1, override_json=None
         return {"packages": packages, "source": "built-in",
                 "message": "Using the built-in packages for 7 people over 9 weekdays."}
     return _no_packages(
-        "Automatic packages are not available yet for %d people over %d weekdays: packages.py is not "
-        "installed and the built-in packages need exactly 7 people and 9 weekdays. Paste a packages JSON "
-        "below (the shape shown under 'Changing the system' in README.md) and save it." % (n, days))
+        "Automatic packages are not available yet for %d people over %d weekdays: the built-in packages "
+        "need exactly 7 people and 9 weekdays. %s" % (n, days, PASTE_PACKAGES))
 
 
 def package_descriptions(structure, packages):
@@ -210,87 +211,6 @@ def package_descriptions(structure, packages):
 
 
 # ---------------------------------------------------------------------------
-# T1 seam: solve a sheet and get a plain dict back
-# ---------------------------------------------------------------------------
-
-def _prepare_compat(text, *, structure=None, mode="rank", packages=None, max_per_day=1, budgets=None, seed=1):
-    """(problem, values, avail) from preferences CSV text, as the CLI's solve command builds them."""
-    people, slot_rows = om.parse_preferences(text)
-    structure = structure or om.infer_structure(slot_rows)
-    dates = sorted({r["date"] for r in slot_rows})
-    problem = om.Problem(structure, dates, people, packages, max_per_day=max_per_day)
-    values, avail = om.preference_values(problem, slot_rows, mode, random.Random(seed), budgets)
-    return problem, values, avail
-
-
-def _solution_dict_compat(problem, values, avail, result):
-    """The plain, JSON-serialisable form of an om.solve() result (same keys as T1's solve_sheet)."""
-    text, rows, _ = om.build_report(problem, values, avail, result)
-    owner, prices = result["owner"], result["prices"]
-    schedule = [{"slot_id": s["id"], "date": s["date"].isoformat(), "weekday": s["date"].strftime("%a"),
-                 "shift": s["code"], "time": s["time"], "hours": s["hours"],
-                 "person": problem.people[owner[j]], "price": prices[j]}
-                for j, s in enumerate(problem.slots)]
-    return {
-        "structure": problem.structure,
-        "people": list(problem.people),
-        "dates": [d.isoformat() for d in problem.dates],
-        "schedule": schedule,
-        "summary": rows,
-        "prices": {s["id"]: prices[j] for j, s in enumerate(problem.slots)},
-        "package_prices": dict(result["pkg_prices"]) if result["market_roles"] else None,
-        "cleared": bool(result["cleared"]),
-        "rounds": int(result["rounds"]),
-        "max_regret": float(result["max_regret"]),
-        "market_roles": bool(result["market_roles"]),
-        "report": text,
-    }
-
-
-def _solve_sheet_compat(text, *, structure=None, mode="rank", roles=None, packages=None, max_per_day=1,
-                        budgets=None, seed=1, log=None):
-    """What om.solve_sheet will do, built from today's public functions (the way oncall_gui.run_solve does)."""
-    problem, values, avail = _prepare_compat(text, structure=structure, mode=mode, packages=packages,
-                                             max_per_day=max_per_day, budgets=budgets, seed=seed)
-    market_roles = roles is None
-    role_list = None if market_roles else [roles.get(p) for p in problem.people]
-    result = om.solve(problem, values, avail, market_roles, role_list, seed=seed, log=log)
-    return _solution_dict_compat(problem, values, avail, result)
-
-
-def _schedule_csv_compat(solution):
-    """schedule.csv text with exactly the columns om.write_outputs writes."""
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["slot_id", "date", "weekday", "shift", "time", "hours", "person", "clearing_price"])
-    for r in solution["schedule"]:
-        w.writerow([r["slot_id"], r["date"], r["weekday"], r["shift"], r["time"], r["hours"], r["person"],
-                    round(r["price"], 2)])
-    return buf.getvalue()
-
-
-def _summary_csv_compat(solution):
-    """summary.csv text with exactly the columns om.write_outputs writes."""
-    rows = solution["summary"]
-    buf = io.StringIO()
-    w = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
-    w.writeheader()
-    w.writerows(rows)
-    return buf.getvalue()
-
-
-# >>> T1 SEAM: when oncall_market.py gains these functions they are used automatically.
-#     After T1 lands: replace these five lines with `from oncall_market import prepare_sheet, ...`
-#     and delete the _compat functions above.
-prepare_sheet = getattr(om, "prepare_sheet", _prepare_compat)
-solve_sheet = getattr(om, "solve_sheet", _solve_sheet_compat)
-solution_dict = getattr(om, "solution_dict", _solution_dict_compat)
-schedule_csv_text = getattr(om, "schedule_csv_text", _schedule_csv_compat)
-summary_csv_text = getattr(om, "summary_csv_text", _summary_csv_compat)
-# <<< end of T1 seam
-
-
-# ---------------------------------------------------------------------------
 # running the market
 # ---------------------------------------------------------------------------
 
@@ -309,21 +229,31 @@ def exact_point_values(problem, text, mode, budgets):
 
 
 def status_line(solution):
+    """How the market ended, in one line: the clearing status, then every warning (indicative
+    prices, a rule violation, the solver's own warnings about min_ranks) each introduced by
+    " WARNING: " so that the dashboard can show them apart."""
+    supported = solution.get("prices_supported", True) is not False
     if solution["cleared"]:
         status = ("The market cleared exactly in %d rounds: everyone holds the bundle they would pick for "
                   "themselves at these prices." % solution["rounds"])
-    else:
+    elif supported:
         status = ("Prices support this assignment with a maximum regret of %.2f points "
                   "(0 = exact equilibrium; under %.1f is as good as exact)." % (solution["max_regret"], REGRET_OK))
+    else:
+        status = ("The prices leave a maximum regret of %.2f points (0 = exact equilibrium; under %.1f is as "
+                  "good as exact). WARNING: Prices are indicative only: the regret exceeds %g points."
+                  % (solution["max_regret"], REGRET_OK, om.REGRET_SUPPORTED))
     if any(r["violations"] for r in solution["summary"]):
         status += (" WARNING: the best schedule found still breaks a rule - usually the X's leave a day "
                    "short-handed. Allow 2 shifts per day or ask for fewer X's.")
+    for warning in solution.get("warnings") or []:
+        status += " WARNING: " + warning
     return status
 
 
 def candidate_from_solution(solution, seed):
     """A JSON-serialisable candidate outcome: the solve_sheet dict plus the owner list, the
-    per-person rows the organiser compares, and a status line."""
+    per-person rows the organiser compares, the solver's warnings and a status line."""
     people = solution["people"]
     index = {p: i for i, p in enumerate(people)}
     owner = [index[r["person"]] for r in solution["schedule"]]
@@ -340,18 +270,58 @@ def candidate_from_solution(solution, seed):
         "schedule": solution["schedule"], "summary": solution["summary"], "person_rows": person_rows,
         "prices": solution["prices"], "package_prices": solution["package_prices"],
         "cleared": solution["cleared"], "rounds": solution["rounds"], "max_regret": solution["max_regret"],
+        "prices_supported": solution.get("prices_supported", True) is not False,
         "market_roles": solution["market_roles"], "report": solution["report"],
+        "warnings": list(solution.get("warnings") or []),
         "status": status_line(solution), "violations": sum(r["violations"] for r in solution["summary"]),
     }
 
 
+def _result_at_prices(source, roles, owner):
+    """An om.solve()-shaped result: these roles (one per person, sheet order) and owners (person
+    index per slot) valued at the prices, rounds, regret and clearing status of `source`, a
+    solve_sheet dict or a candidate.  Used for the equivalent alternatives of a run and for
+    hand edits, so that every schedule is compared at the same prices."""
+    result = {"roles": list(roles), "owner": list(owner),
+              "prices": [source["prices"][r["slot_id"]] for r in source["schedule"]],
+              "pkg_prices": dict(source["package_prices"] or {}),
+              "cleared": source["cleared"], "rounds": source["rounds"],
+              "max_regret": source["max_regret"], "market_roles": bool(source["market_roles"])}
+    if source.get("prices_supported") is not None:
+        result["prices_supported"] = bool(source["prices_supported"])
+    return result
+
+
+def alternative_result(solution, alt):
+    """The result for one entry of solution["alternatives"], at the solution's prices."""
+    people = solution["people"]
+    index = {p: i for i, p in enumerate(people)}
+    return _result_at_prices(solution, [alt["roles"][p] for p in people], [index[p] for p in alt["owner"]])
+
+
+def _with_min_ranks(function, kwargs, min_ranks):
+    """kwargs plus min_ranks when the cycle has one and `function` takes that keyword."""
+    if min_ranks is None:
+        return kwargs
+    params = inspect.signature(function).parameters
+    if "min_ranks" in params or any(p.kind == p.VAR_KEYWORD for p in params.values()):
+        return dict(kwargs, min_ranks=int(min_ranks))
+    return kwargs
+
+
 def run_market(cycle, participants, submissions, packages, seeds=DEFAULT_SEEDS, log=None):
-    """Solve once per seed for the responders and return the distinct outcomes.
+    """Solve once for the responders and return one candidate per welfare-equivalent schedule.
 
     cycle: a repo cycle dict; participants: repo participant dicts (name, budget);
     submissions: {name: cells}; packages: the dict get_packages() returned.
-    Returns {"candidates": [...best first...], "responders": [names], "excluded": [names],
-             "packages": packages, "budgets": {...}, "text": preferences CSV text}.
+    seeds: kept for compatibility; only the first seed is used.  The point values and the
+    clearing prices do not depend on the seed, and one solve reports every equivalent
+    schedule it found in solution["alternatives"], so re-solving with other seeds adds nothing.
+    Returns {"candidates": [the market's choice first, then the equivalent alternatives in the
+             solver's order], "responders": [names], "excluded": [names], "packages": packages,
+             "budgets": {...}, "text": preferences CSV text}.
+    Every candidate is valued at the same prices (the market's); its "warnings" and
+    "prices_supported" come from the solver and are repeated in its status line.
     Raises om.SchedulingError for anything the organiser has to fix."""
     responders, excluded = split_responders(participants, submissions)
     if not responders:
@@ -359,28 +329,30 @@ def run_market(cycle, participants, submissions, packages, seeds=DEFAULT_SEEDS, 
     people = [p["name"] for p in responders]
     budgets = budgets_of(responders)
     text = sheet_text(cycle, people, submissions)
+    seed = int(seeds[0]) if seeds else 1
     kwargs = dict(structure=cycle["structure"], mode=cycle["mode"], packages=packages,
-                  max_per_day=int(cycle["max_per_day"]), budgets=budgets)
-    problem, _, _ = prepare_sheet(text, seed=1, **kwargs)
+                  max_per_day=int(cycle["max_per_day"]), budgets=budgets, seed=seed)
+    min_ranks = cycle.get("min_ranks")
+    problem, values, avail = prepare_sheet(text, **_with_min_ranks(prepare_sheet, kwargs, min_ranks))
     exact = exact_point_values(problem, text, cycle["mode"], budgets)
-    by_owner = {}
-    for seed in seeds:
-        if log:
-            log("seed %d ..." % seed)
-        solution = solve_sheet(text, seed=int(seed), log=log, **kwargs)
-        cand = candidate_from_solution(solution, int(seed))
+    if log:
+        log("Solving (seed %d) ..." % seed)
+    solution = solve_sheet(text, log=log, **_with_min_ranks(solve_sheet, kwargs, min_ranks))
+    chosen = ([r["person"] for r in solution["schedule"]], {r["person"]: r["package"] for r in solution["summary"]})
+    solutions = [solution]
+    for alt in solution.get("alternatives") or []:
+        if alt.get("chosen") or (list(alt["owner"]), dict(alt["roles"])) == chosen:
+            continue
+        solutions.append(solution_dict(problem, values, avail, alternative_result(solution, alt)))
+    candidates = []
+    for k, sol in enumerate(solutions):
+        cand = candidate_from_solution(sol, seed)
         cand["total_points"] = round(sum(exact[cand["owner"][j]][j] for j in range(len(cand["owner"]))), 3)
-        key = tuple(cand["owner"])
-        if key in by_owner:
-            by_owner[key]["seeds"].append(int(seed))
-        else:
-            by_owner[key] = cand
-    candidates = sorted(by_owner.values(), key=lambda c: (-c["total_points"], c["seeds"][0]))
-    best = candidates[0]["total_points"]
-    for k, cand in enumerate(candidates):
+        cand["label"] = "Outcome 1 (the market's choice)" if k == 0 else "Outcome %d (equivalent alternative)" % (k + 1)
+        candidates.append(cand)
+    best = max(c["total_points"] for c in candidates)
+    for cand in candidates:
         cand["equivalent_to_best"] = (best - cand["total_points"]) <= EQUIVALENT_POINTS
-        cand["label"] = "Outcome %d (seed%s %s)" % (k + 1, "s" if len(cand["seeds"]) > 1 else "",
-                                                   ", ".join(str(s) for s in cand["seeds"]))
     return {"candidates": candidates, "responders": people, "excluded": excluded, "packages": packages,
             "budgets": budgets or {}, "text": text}
 
@@ -391,7 +363,7 @@ def run_market(cycle, participants, submissions, packages, seeds=DEFAULT_SEEDS, 
 
 class Context:
     """The problem, point values and availability behind a candidate, rebuilt from the
-    stored data (same seed, so the values are identical to the run's)."""
+    stored data (the point values do not depend on the seed, so they are the run's)."""
 
     def __init__(self, cycle, responders, submissions, packages, seed=1):
         self.people = [p["name"] for p in responders]
@@ -410,13 +382,7 @@ def build_context(cycle, responders, submissions, packages, seed=1):
 
 def result_for_owner(candidate, owner):
     """An om.solve()-shaped result for the candidate's prices with a (possibly edited) owner list."""
-    people = candidate["people"]
-    slot_ids = [r["slot_id"] for r in candidate["schedule"]]
-    return {"roles": [candidate["roles"][p] for p in people], "owner": list(owner),
-            "prices": [candidate["prices"][sid] for sid in slot_ids],
-            "pkg_prices": dict(candidate["package_prices"] or {}),
-            "cleared": candidate["cleared"], "rounds": candidate["rounds"],
-            "max_regret": candidate["max_regret"], "market_roles": bool(candidate["market_roles"])}
+    return _result_at_prices(candidate, [candidate["roles"][p] for p in candidate["people"]], owner)
 
 
 def solution_for_owner(ctx, candidate, owner):
@@ -505,6 +471,16 @@ def _between(a, b):
 def grid_table(grid):
     """The grid as a list of dicts (what st.table takes)."""
     return [dict(zip(grid["columns"], row)) for row in grid["rows"]]
+
+
+def tie_rule_from_report(report):
+    """The tie-break rule as the solution report states it ("Ties: N equivalent schedules
+    (...); chosen by <rule>."), or None when the report has no such line."""
+    for line in (report or "").splitlines():
+        line = line.strip()
+        if line.startswith("Ties:") and "; chosen by " in line:
+            return line.split("; chosen by ", 1)[1].rstrip(".")
+    return None
 
 
 def edits_csv_text(edits):

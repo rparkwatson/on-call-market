@@ -116,3 +116,22 @@ def test_admin_dashboard_renders(Session):
     assert [t.label for t in at.tabs] == ["Setup", "Links", "Status", "Run market", "Review and edit", "Publish", "Danger zone"]
     assert any(b.label == "Run the market" for b in at.button)
     assert any("Using the built-in packages" in c.value or "Packages derived automatically" in c.value for c in at.caption)
+    assert all(n.label != "Seeds to try" for n in at.number_input)  # one solve finds every equivalent schedule
+
+
+def test_run_market_lists_the_equivalent_schedules(Session):
+    """Run the market on the example cycle (one solve, about 10 s): the market's choice is listed
+    first with the two equivalent alternatives, and the solver's warning about Person D shows."""
+    cycle = make_example_cycle(Session, name="Smoke run", close=True)
+    at = _app(a=cycle["admin_token"]).run()
+    next(b for b in at.button if b.label == "Run the market").click().run()
+    assert not at.exception
+    assert any(h.value.startswith("Run at ") and h.value.endswith(": 3 equivalent schedules") for h in at.subheader)
+    assert any("Its own choice is listed first, picked by the highest minimum % of ideal" in c.value for c in at.caption)
+    assert sum("Outcome 1 (the market's choice)" in m.value for m in at.markdown) == 1
+    assert sum("(equivalent alternative)" in m.value and "equivalent to outcome 1" in m.value for m in at.markdown) == 2
+    assert sum(b.label == "Choose this outcome" for b in at.button) == 3
+    assert sum(w.value == "Person D ranked 5 slots; the minimum is 6." for w in at.warning) == 3
+    with Session() as s:
+        run = repo.get_latest_run(s, cycle["id"])
+    assert run["seeds"] == [1] and len(run["candidates"]) == 3
