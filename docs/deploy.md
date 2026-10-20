@@ -148,8 +148,10 @@ SQLite file.
   the saved link for missing characters.
 - An error mentioning `psycopg` or "could not connect": the secret is missing or wrong;
   re-copy the connection string from Neon and make sure it is inside double quotes.
-- "Automatic packages are not available yet": the number of responders is not 7 or the
-  period is not 9 weekdays and the automatic package module is not installed yet. Paste a
-  packages JSON on the Run market tab (see README.md, "Changing the system").
+- A message that packages could not be derived for this cycle: `packages.py` found no fair
+  split for that number of responders over that many weekdays (the message says what
+  headcount or shifts-per-day limit would work). Either change the cycle or paste a packages
+  JSON on the Run market tab (format in README.md, "Changing the system"; worked examples in
+  `docs/packages.md`).
 - The app shows an old version after a push: open the app's menu (bottom right) and choose
   "Reboot app".
