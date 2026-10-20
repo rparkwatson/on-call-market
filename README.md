@@ -155,16 +155,21 @@ Built-in packages per structure:
 
 If this rotation repeats, the simplest fix for a one-off imbalance is to run the next cycle with
 `--roles fixed` and give the heavy package to different people. The market offers a finer tool:
-`summary.csv` has a `next_budget_suggestion` column equal to `100 − net price`. Someone who was
-compensated this cycle (negative net price) gets a larger budget next cycle, so their preferences
-carry more weight; someone who got the popular slots gets a smaller one. Save those numbers to a
-file with columns `person,budget` and pass it with `--budgets`.
+`summary.csv` has a `next_budget_suggestion` column, a damped carry-over of this cycle's net
+price: `100 + 0.5 × compensation`, where the compensation is minus the net price, kept between
+75 and 125 and rounded to 0.1. Someone who was compensated this cycle (negative net price) gets
+a larger budget next cycle, so their preferences carry more weight; someone who got the popular
+slots gets a smaller one. Carrying only half, with a cap, stops one cycle's prices from swinging
+the next one too far: in a probe, giving a single person 30 extra points moved three other
+people's satisfaction by 14 to 20 points of ideal. Save those numbers to a file with columns
+`person,budget` and pass it with `--budgets`.
 
 ## Changing the system
 
 **Different dates or headcount.** `template`/`demo` take `--start`, `--days`, `--skip` and
-`--people`. The built-in packages assume 9 days and 7 people; with other numbers the program
-will tell you the packages no longer add up, and you provide your own:
+`--people`. The built-in packages assume 9 days and 7 people; for any other size run
+`python packages.py --structure three --people 6 --days 9` to derive a fair package set
+automatically (see `docs/packages.md`). To override the packages by hand, write a JSON file:
 
 ```json
 {

@@ -59,9 +59,20 @@ class TestExampleEndToEnd:
 
     def test_summary_figures_are_consistent(self, example_solution):
         for row in example_solution["summary"]:
-            assert row["next_budget_suggestion"] == pytest.approx(100.0 - row["net_price"], abs=0.051)
+            # damped carry-over: half of the compensation (minus the net price), within 75 to 125
+            assert row["next_budget_suggestion"] == pytest.approx(100.0 - 0.5 * row["net_price"], abs=0.051)
+            assert 75.0 <= row["next_budget_suggestion"] <= 125.0
             assert 0.0 <= row["pct_of_ideal"] <= 100.0
             assert row["violations"] == 0
+
+
+class TestCarryOver:
+    @pytest.mark.parametrize("net_price, budget", [
+        (0.0, 100.0), (-10.0, 105.0), (10.0, 95.0), (21.24, 89.4), (-21.24, 110.6),
+        (-50.0, 125.0), (-60.0, 125.0), (50.0, 75.0), (60.0, 75.0),
+    ])
+    def test_next_budget_is_damped_and_capped(self, net_price, budget):
+        assert om.next_budget(net_price) == budget
 
     def test_other_seeds_also_give_valid_schedules(self, example_text):
         problem, values, avail = om.prepare_sheet(example_text, seed=2)

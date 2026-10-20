@@ -58,6 +58,11 @@ MAX_TIE_EXPANSIONS = 12    # equivalent schedules whose pair-move neighbours are
 NOISE = 1e-6               # per-slot tie-break noise added to the point values
 NOISE_SEED = 1             # fixed (the default seed), so prices and the search inputs do not depend on the solve seed
 
+# Damped carry-over (decision Q8): next cycle's budget is BUDGET plus CARRY_OVER_DAMPING times this
+# cycle's compensation (minus the net price), kept within BUDGET +/- CARRY_OVER_CAP.
+CARRY_OVER_DAMPING = 0.5
+CARRY_OVER_CAP = 25.0
+
 
 class SchedulingError(Exception):
     """A problem with the inputs that the user has to fix (reported without a traceback)."""
@@ -1010,6 +1015,13 @@ def solve(problem, values, avail, market_roles=True, roles=None, iters=400, step
             "alternatives": alternatives}
 
 
+def next_budget(net_price):
+    """The budget to suggest for next cycle: BUDGET plus half of this cycle's compensation (minus
+    the net price), capped at BUDGET +/- 25 and rounded to 0.1 (README, "Carrying fairness")."""
+    budget = BUDGET + CARRY_OVER_DAMPING * (-net_price)
+    return round(min(BUDGET + CARRY_OVER_CAP, max(BUDGET - CARRY_OVER_CAP, budget)), 1)
+
+
 def ties_lines(problem, result):
     """The report's account of welfare-equivalent schedules and how the final one was chosen."""
     alts = result.get("alternatives")
@@ -1088,7 +1100,7 @@ def build_report(problem, values, avail, result):
                      "points_received": round(pts, 1),
                      "pct_of_ideal": None if share is None else round(share, 1),
                      "net_price": None if paid is None else round(paid, 1),
-                     "next_budget_suggestion": None if paid is None else round(BUDGET - paid, 1),
+                     "next_budget_suggestion": None if paid is None else next_budget(paid),
                      "violations": viol, "slots": " ".join(problem.slots[j]["id"] for j in mine[i]),
                      "responded": bool(responded[i])})
     out.append("  total preference points satisfied: %.1f" % total_pts)
