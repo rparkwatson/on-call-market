@@ -1,18 +1,13 @@
 """Bridge between the stored cycle data and oncall_market.  No Streamlit imports.
 
-Seams for the sibling tasks
----------------------------
-T1 adds om.prepare_sheet / om.solve_sheet / om.solution_dict / om.schedule_csv_text /
-om.summary_csv_text to oncall_market.py.  Until they land, the _compat functions in the
-"T1 seam" section do the same work with the public functions that exist today
-(parse_preferences, Problem, preference_values, solve, build_report), and the getattr lines
-at the end of that section pick up the real functions automatically.  When T1 has landed,
-delete the _compat functions and the getattr lines and import the names from om directly.
+The solver is reached only through oncall_market's library entry point: prepare_sheet,
+solve_sheet and solution_dict (the solve_sheet dict is the one solver interface, see its
+docstring), plus schedule_csv_text and summary_csv_text for the downloads.
 
-T2 adds packages.py with derive_packages(structure, n_people, days, max_per_day=1).
-get_packages() imports it when present (T2 seam), otherwise uses the built-in packages for
-7 people over 9 weekdays, otherwise reports that automatic packages are not available and
-lets the organiser paste a packages JSON.
+Packages come from packages.derive_packages(structure, n_people, days, max_per_day=1) for
+the responders.  When it cannot derive a set for this size, get_packages() reports why and
+the organiser can paste a packages JSON instead (the tests also exercise the built-in
+packages for 7 people over 9 weekdays with the module forced absent).
 
 Non-responders (decision Q6) are excluded: the problem is built for the responders only.
 """
@@ -24,11 +19,11 @@ import csv
 import importlib
 import io
 import json
-import random
 from collections import Counter
 from datetime import date, timedelta
 
 import oncall_market as om
+from oncall_market import prepare_sheet, solve_sheet, solution_dict, schedule_csv_text, summary_csv_text  # noqa: F401
 
 DEFAULT_SEEDS = (1, 2, 3)
 EQUIVALENT_POINTS = 0.05   # outcomes whose total points are within this are shown as equivalent
@@ -119,11 +114,16 @@ def budgets_of(responders):
 
 
 # ---------------------------------------------------------------------------
-# packages (T2 seam)
+# packages
 # ---------------------------------------------------------------------------
 
+PASTE_PACKAGES = ("Paste a packages JSON below (the shape shown under 'Changing the system' in README.md) "
+                  "and save it.")
+
+
 def _derive_packages_function():
-    """T2 seam: packages.derive_packages(structure, n_people, days, max_per_day=1) when present."""
+    """packages.derive_packages(structure, n_people, days, max_per_day=1); None only when the
+    module is absent (the tests force that to reach the built-in packages)."""
     try:
         module = importlib.import_module("packages")
     except ImportError:
@@ -150,9 +150,9 @@ def get_packages(structure, responders, dates, max_per_day=1, override_json=None
     """The packages to solve with, for the RESPONDERS.
 
     Returns {"packages": dict or None, "source": str or None, "message": str}.
-    Order: a pasted override; packages.derive_packages when T2's module is importable; the
-    built-in packages when there are exactly 7 responders and 9 weekdays; otherwise None with
-    a message asking the organiser to paste a packages JSON."""
+    Order: a pasted override; packages.derive_packages (when it raises, its message plus an
+    invitation to paste a packages JSON); without the module, the built-in packages when there
+    are exactly 7 responders and 9 weekdays, otherwise None with the same invitation."""
     names = [p["name"] if isinstance(p, dict) else str(p) for p in responders]
     n, days = len(names), len(dates)
     if override_json:
@@ -170,10 +170,11 @@ def get_packages(structure, responders, dates, max_per_day=1, override_json=None
         try:
             packages = derive(structure, n, days, max_per_day=max_per_day)
         except om.SchedulingError as e:
-            return _no_packages("packages.py could not derive packages for %d people over %d weekdays: %s" % (n, days, e))
+            return _no_packages("packages.py could not derive packages for %d people over %d weekdays: %s %s"
+                                % (n, days, str(e).rstrip(".") + ".", PASTE_PACKAGES))
         err = _check_packages(structure, dates, names, packages, max_per_day)
         if err:
-            return _no_packages("packages.py returned packages that do not fit this cycle: %s" % err)
+            return _no_packages("packages.py returned packages that do not fit this cycle: %s %s" % (err, PASTE_PACKAGES))
         return {"packages": packages, "source": "packages.py",
                 "message": "Packages derived automatically for %d people over %d weekdays." % (n, days)}
     if n == 7 and days == 9:
@@ -184,9 +185,8 @@ def get_packages(structure, responders, dates, max_per_day=1, override_json=None
         return {"packages": packages, "source": "built-in",
                 "message": "Using the built-in packages for 7 people over 9 weekdays."}
     return _no_packages(
-        "Automatic packages are not available yet for %d people over %d weekdays: packages.py is not "
-        "installed and the built-in packages need exactly 7 people and 9 weekdays. Paste a packages JSON "
-        "below (the shape shown under 'Changing the system' in README.md) and save it." % (n, days))
+        "Automatic packages are not available yet for %d people over %d weekdays: the built-in packages "
+        "need exactly 7 people and 9 weekdays. %s" % (n, days, PASTE_PACKAGES))
 
 
 def package_descriptions(structure, packages):
@@ -207,87 +207,6 @@ def package_descriptions(structure, packages):
         hours = "%g" % lo_h if lo_h == hi_h else "%g-%g" % (lo_h, hi_h)
         rows.append({"package": name, "people": int(pk["count"]), "contents": ", ".join(parts), "hours": hours})
     return rows
-
-
-# ---------------------------------------------------------------------------
-# T1 seam: solve a sheet and get a plain dict back
-# ---------------------------------------------------------------------------
-
-def _prepare_compat(text, *, structure=None, mode="rank", packages=None, max_per_day=1, budgets=None, seed=1):
-    """(problem, values, avail) from preferences CSV text, as the CLI's solve command builds them."""
-    people, slot_rows = om.parse_preferences(text)
-    structure = structure or om.infer_structure(slot_rows)
-    dates = sorted({r["date"] for r in slot_rows})
-    problem = om.Problem(structure, dates, people, packages, max_per_day=max_per_day)
-    values, avail = om.preference_values(problem, slot_rows, mode, random.Random(seed), budgets)
-    return problem, values, avail
-
-
-def _solution_dict_compat(problem, values, avail, result):
-    """The plain, JSON-serialisable form of an om.solve() result (same keys as T1's solve_sheet)."""
-    text, rows, _ = om.build_report(problem, values, avail, result)
-    owner, prices = result["owner"], result["prices"]
-    schedule = [{"slot_id": s["id"], "date": s["date"].isoformat(), "weekday": s["date"].strftime("%a"),
-                 "shift": s["code"], "time": s["time"], "hours": s["hours"],
-                 "person": problem.people[owner[j]], "price": prices[j]}
-                for j, s in enumerate(problem.slots)]
-    return {
-        "structure": problem.structure,
-        "people": list(problem.people),
-        "dates": [d.isoformat() for d in problem.dates],
-        "schedule": schedule,
-        "summary": rows,
-        "prices": {s["id"]: prices[j] for j, s in enumerate(problem.slots)},
-        "package_prices": dict(result["pkg_prices"]) if result["market_roles"] else None,
-        "cleared": bool(result["cleared"]),
-        "rounds": int(result["rounds"]),
-        "max_regret": float(result["max_regret"]),
-        "market_roles": bool(result["market_roles"]),
-        "report": text,
-    }
-
-
-def _solve_sheet_compat(text, *, structure=None, mode="rank", roles=None, packages=None, max_per_day=1,
-                        budgets=None, seed=1, log=None):
-    """What om.solve_sheet will do, built from today's public functions (the way oncall_gui.run_solve does)."""
-    problem, values, avail = _prepare_compat(text, structure=structure, mode=mode, packages=packages,
-                                             max_per_day=max_per_day, budgets=budgets, seed=seed)
-    market_roles = roles is None
-    role_list = None if market_roles else [roles.get(p) for p in problem.people]
-    result = om.solve(problem, values, avail, market_roles, role_list, seed=seed, log=log)
-    return _solution_dict_compat(problem, values, avail, result)
-
-
-def _schedule_csv_compat(solution):
-    """schedule.csv text with exactly the columns om.write_outputs writes."""
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["slot_id", "date", "weekday", "shift", "time", "hours", "person", "clearing_price"])
-    for r in solution["schedule"]:
-        w.writerow([r["slot_id"], r["date"], r["weekday"], r["shift"], r["time"], r["hours"], r["person"],
-                    round(r["price"], 2)])
-    return buf.getvalue()
-
-
-def _summary_csv_compat(solution):
-    """summary.csv text with exactly the columns om.write_outputs writes."""
-    rows = solution["summary"]
-    buf = io.StringIO()
-    w = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
-    w.writeheader()
-    w.writerows(rows)
-    return buf.getvalue()
-
-
-# >>> T1 SEAM: when oncall_market.py gains these functions they are used automatically.
-#     After T1 lands: replace these five lines with `from oncall_market import prepare_sheet, ...`
-#     and delete the _compat functions above.
-prepare_sheet = getattr(om, "prepare_sheet", _prepare_compat)
-solve_sheet = getattr(om, "solve_sheet", _solve_sheet_compat)
-solution_dict = getattr(om, "solution_dict", _solution_dict_compat)
-schedule_csv_text = getattr(om, "schedule_csv_text", _schedule_csv_compat)
-summary_csv_text = getattr(om, "summary_csv_text", _summary_csv_compat)
-# <<< end of T1 seam
 
 
 # ---------------------------------------------------------------------------
