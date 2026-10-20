@@ -80,7 +80,7 @@ class TestSolve:
         assert sched[1][6] in om.DEFAULT_PEOPLE
         float(sched[1][7])
         assert summ[0] == ["person", "package", "shifts", "hours", "points_received", "pct_of_ideal", "net_price",
-                           "next_budget_suggestion", "violations", "slots"]
+                           "next_budget_suggestion", "violations", "slots", "responded"]
         assert [r[0] for r in summ[1:]] == om.DEFAULT_PEOPLE
 
     def test_quiet_stdout_has_the_summary_line_report_and_file_names(self, example_cli):

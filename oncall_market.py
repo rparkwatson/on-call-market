@@ -462,6 +462,36 @@ def preference_values(problem, slot_rows, mode, rng, budgets=None):
     return values, avail
 
 
+def response_check(people, slot_rows, mode, min_ranks=None):
+    """(responded, warnings).  responded[i] is False for a column with no ranks and no X's (a
+    non-responder: the solver flags them, the app excludes them).  warnings are plain sentences
+    for the report: every non-responder and, when min_ranks is given, everyone who ranked fewer
+    slots (in points mode a cell counts as a rank when its points are above zero)."""
+    n = len(people)
+    ranks, xs = [0] * n, [0] * n
+    for r in slot_rows:
+        for i, c in enumerate(r["cells"][:n]):
+            if c == "":
+                continue
+            if c.lower() in UNAVAILABLE_TOKENS:
+                xs[i] += 1
+                continue
+            try:
+                v = float(c)
+            except ValueError:
+                continue  # preference_values reports unreadable cells
+            if mode == "rank" or v > 0:
+                ranks[i] += 1
+    responded = [ranks[i] > 0 or xs[i] > 0 for i in range(n)]
+    warnings = []
+    for i, p in enumerate(people):
+        if not responded[i]:
+            warnings.append("%s submitted no preferences (no ranks and no X's); their metrics are not meaningful." % p)
+        elif min_ranks is not None and ranks[i] < min_ranks:
+            warnings.append("%s ranked %d slot%s; the minimum is %d." % (p, ranks[i], "" if ranks[i] == 1 else "s", min_ranks))
+    return responded, warnings
+
+
 def check_feasibility(problem, values, avail):
     """Catch the obvious impossibilities before running the market."""
     n = len(problem.people)
@@ -1010,8 +1040,6 @@ def build_report(problem, values, avail, result):
         mine[i].append(j)
     for i in range(n):
         mine[i].sort()
-    zero = [0.0] * m
-    pkgs = list(problem.packages.keys())
     out = []
 
     out.append("SCHEDULE")
@@ -1035,29 +1063,45 @@ def build_report(problem, values, avail, result):
     rows = []
     total_pts = 0.0
     ideals = ideal_points(problem, values, avail, market_roles, roles)
+    responded = getattr(problem, "responded", None) or [True] * n
     for i in range(n):
         hours = sum(problem.slots[j]["hours"] for j in mine[i])
         pts = sum(values[i][j] for j in mine[i])
         total_pts += pts
         paid = sum(prices[j] for j in mine[i]) + (pkg_prices[roles[i]] if market_roles else 0.0)
         ideal = ideals[i]
-        share = (pts / ideal * 100.0) if ideal > 1e-9 else 100.0
+        # No ranks (ideal is tie-break noise only) means % of ideal is meaningless; a non-responder's
+        # net price is meaningless too (F4).  Both are reported as n/a.
+        share = (pts / ideal * 100.0) if ideal > 1e-3 and responded[i] else None
+        if not responded[i]:
+            paid = None
         viol = problem.violations(i, mine[i], avail)
         shifts = ", ".join("%s %s" % (fmt_date(problem.slots[j]["date"]), problem.slots[j]["code"]) for j in mine[i])
-        out.append("  %-*s %-16s %4.1f h  %d shifts  %5.1f pts (%3.0f%% of ideal)  net price %+6.1f%s"
-                   % (width, problem.people[i], roles[i], hours, len(mine[i]), pts, share, paid,
+        out.append("  %-*s %-16s %4.1f h  %d shifts  %5.1f pts (%s of ideal)  net price %s%s"
+                   % (width, problem.people[i], roles[i], hours, len(mine[i]), pts,
+                      "n/a" if share is None else "%3.0f%%" % share, "   n/a" if paid is None else "%+6.1f" % paid,
                       ("  CONSTRAINT VIOLATIONS: %d" % viol) if viol else ""))
         out.append("  %-*s %s" % (width, "", shifts))
+        if not responded[i]:
+            out.append("  %-*s no preferences submitted" % (width, ""))
         rows.append({"person": problem.people[i], "package": roles[i], "shifts": len(mine[i]), "hours": hours,
-                     "points_received": round(pts, 1), "pct_of_ideal": round(share, 1), "net_price": round(paid, 1),
-                     "next_budget_suggestion": round(BUDGET - paid, 1),
-                     "violations": viol, "slots": " ".join(problem.slots[j]["id"] for j in mine[i])})
+                     "points_received": round(pts, 1),
+                     "pct_of_ideal": None if share is None else round(share, 1),
+                     "net_price": None if paid is None else round(paid, 1),
+                     "next_budget_suggestion": None if paid is None else round(BUDGET - paid, 1),
+                     "violations": viol, "slots": " ".join(problem.slots[j]["id"] for j in mine[i]),
+                     "responded": bool(responded[i])})
     out.append("  total preference points satisfied: %.1f" % total_pts)
     out.extend(ties_lines(problem, result))
     if any(r["violations"] for r in rows):
         out.append("")
         out.append("  WARNING: the best schedule found still breaks a rule (see CONSTRAINT VIOLATIONS above).")
         out.append("  Usually this means the X's leave a day short-handed; allow 2 shifts per day or ask for fewer X's.")
+    warnings = list(getattr(problem, "warnings", None) or [])
+    if warnings:
+        out.append("")
+        out.append("WARNINGS")
+        out.extend("  - " + w for w in warnings)
 
     out.append("")
     out.append("CLEARING PRICES (points; positive = sought after, negative = that slot pays you to take it)")
@@ -1104,11 +1148,15 @@ def validate_roles(problem, roles):
 # Library entry point: the command line, the local GUI and the hosted app all go through here
 # ---------------------------------------------------------------------------
 
-def prepare_sheet(text, *, structure=None, mode="rank", packages=None, max_per_day=1, budgets=None, seed=1):
+def prepare_sheet(text, *, structure=None, mode="rank", packages=None, max_per_day=1, budgets=None, seed=1,
+                  min_ranks=None):
     """Turn preferences CSV text into solver inputs.  Returns (problem, values, avail).
 
     The first half of solve_sheet(); cmd_solve calls it directly so that it can print the
     problem size and parse --roles-map before solving.  Arguments are as for solve_sheet().
+    The problem carries two extra attributes read by the report: problem.responded (one flag
+    per person, False for a column with no ranks and no X's) and problem.warnings (see
+    response_check); both are harmless to callers that build a Problem by hand.
     """
     if mode not in ("rank", "points"):
         raise SchedulingError("mode must be 'rank' or 'points', not %r." % (mode,))
@@ -1125,6 +1173,8 @@ def prepare_sheet(text, *, structure=None, mode="rank", packages=None, max_per_d
     # The tie-break noise uses a fixed seed: the clearing prices and the search inputs are then the
     # same for every solve seed, and the seed only drives the assignment search (see solve()).
     values, avail = preference_values(problem, slot_rows, mode, random.Random(NOISE_SEED), budgets)
+    problem.responded, problem.warnings = response_check(
+        people, slot_rows, mode, None if min_ranks is None else int(min_ranks))
     return problem, values, avail
 
 
@@ -1157,6 +1207,7 @@ def solution_dict(problem, values, avail, result):
         "max_regret": float(result["max_regret"]),
         "market_roles": bool(result["market_roles"]),
         "report": text,
+        "warnings": list(getattr(problem, "warnings", None) or []),
         "alternatives": [
             {"owner": [problem.people[i] for i in alt["owner"]],
              "roles": {problem.people[i]: alt["roles"][i] for i in range(len(problem.people))},
@@ -1167,7 +1218,7 @@ def solution_dict(problem, values, avail, result):
 
 
 def solve_sheet(text, *, structure=None, mode="rank", roles=None, packages=None, max_per_day=1, budgets=None,
-                seed=1, iters=400, step=3.0, decay=40.0, sa_iters=40000, restarts=4, log=None):
+                seed=1, iters=400, step=3.0, decay=40.0, sa_iters=40000, restarts=4, log=None, min_ranks=None):
     """Solve a preferences sheet end to end and return a plain dict.
 
     This is the one library entry point: the command line (cmd_solve), the local GUI
@@ -1189,6 +1240,8 @@ def solve_sheet(text, *, structure=None, mode="rank", roles=None, packages=None,
       seed, iters, step, decay, sa_iters, restarts
                    the `solve` command's options of the same names.
       log          optional callable that receives progress lines (the CLI passes print).
+      min_ranks    optional minimum number of ranked slots per person; anyone below it is named
+                   in `warnings` (never an error: the app enforces the minimum, the solver reports).
 
     Returns a dict with exactly these keys (all values are JSON-serialisable):
       structure       'single' | 'two' | 'three'
@@ -1200,9 +1253,13 @@ def solve_sheet(text, *, structure=None, mode="rank", roles=None, packages=None,
                       to 2 decimals as clearing_price.
       summary         one row per person in sheet order, the rows of summary.csv:
                       {person, package, shifts, hours, points_received, pct_of_ideal,
-                       net_price, next_budget_suggestion, violations, slots}
+                       net_price, next_budget_suggestion, violations, slots, responded}
                       where slots is a space-separated string of slot ids and the point
-                      and price figures are rounded to 1 decimal.
+                      and price figures are rounded to 1 decimal.  responded is False for
+                      a column with no ranks and no X's; that person's pct_of_ideal,
+                      net_price and next_budget_suggestion are None ("n/a" in the text
+                      report and in summary.csv), as is pct_of_ideal for anyone who
+                      ranked nothing.
       prices          {slot_id: price} (unrounded)
       package_prices  {package: price}, or None when roles were fixed
       cleared         True when the market cleared exactly
@@ -1211,6 +1268,8 @@ def solve_sheet(text, *, structure=None, mode="rank", roles=None, packages=None,
                       (0.0 for an exact clearing)
       market_roles    False when roles were fixed
       report          the text report the `solve` command prints
+      warnings        [sentence, ...] about non-responders and, with min_ranks, people who
+                      ranked too few slots; [] when there is nothing to say
       alternatives    the welfare-equivalent schedules (total preference points within
                       TIE_TOLERANCE of the best), best-ranked first, each
                       {owner: [person per slot in schedule order], roles: {person: package},
@@ -1226,7 +1285,7 @@ def solve_sheet(text, *, structure=None, mode="rank", roles=None, packages=None,
     packages that do not add up, a wrong roles mapping).
     """
     problem, values, avail = prepare_sheet(text, structure=structure, mode=mode, packages=packages,
-                                           max_per_day=max_per_day, budgets=budgets, seed=seed)
+                                           max_per_day=max_per_day, budgets=budgets, seed=seed, min_ranks=min_ranks)
     market_roles = roles is None
     role_list = None if market_roles else roles_in_order(problem, roles)
     result = solve(problem, values, avail, market_roles, role_list, iters, step, decay, sa_iters, restarts, seed, log)
@@ -1250,7 +1309,7 @@ def summary_csv_text(solution):
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
     w.writeheader()
-    w.writerows(rows)
+    w.writerows([{k: ("n/a" if v is None else v) for k, v in r.items()} for r in rows])
     return buf.getvalue()
 
 
@@ -1376,7 +1435,8 @@ def cmd_solve(args):
     # Same path as solve_sheet(): prepare_sheet -> solve -> solution_dict, split here only so the
     # problem size can be printed and --roles-map parsed (with its own messages) before solving.
     problem, values, avail = prepare_sheet(text, structure=args.structure, mode=args.mode, packages=packages,
-                                           max_per_day=args.max_per_day, budgets=budgets, seed=args.seed)
+                                           max_per_day=args.max_per_day, budgets=budgets, seed=args.seed,
+                                           min_ranks=args.min_ranks)
 
     market_roles = args.roles == "market"
     roles = None if market_roles else parse_roles_map(args.roles_map or "", problem.people, problem.packages)
@@ -1428,6 +1488,7 @@ def main(argv=None):
     s.add_argument("--packages", help="JSON file overriding the built-in packages")
     s.add_argument("--max-per-day", type=int, default=1, help="shifts one person may take on the same day (default 1)")
     s.add_argument("--budgets", help="CSV (person,budget) giving some people more than 100 points, e.g. to carry over last cycle's compensation")
+    s.add_argument("--min-ranks", type=int, help="list anyone who ranked fewer slots than this under WARNINGS in the report")
     s.add_argument("--iters", type=int, default=400, help="maximum price-adjustment rounds")
     s.add_argument("--step", type=float, default=3.0, help="initial price step (points)")
     s.add_argument("--decay", type=float, default=40.0, help="rounds after which the step has halved")

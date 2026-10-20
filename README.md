@@ -57,6 +57,7 @@ python oncall_market.py solve preferences_example.csv
 | `--roles market` / `--roles fixed --roles-map "Ana=heavy,Ben=light_evenings,..."` | Let the market decide who takes which package (default), or fix it. |
 | `--max-per-day 2` | Allow someone two shifts on the same day (default 1). |
 | `--budgets budgets.csv` | Give some people more than 100 points (see "Carrying fairness across cycles"). |
+| `--min-ranks 6` | List under WARNINGS anyone who ranked fewer than 6 slots (a report, not an error). |
 | `--packages packages.json` | Replace the built-in packages (see "Changing the system"). |
 | `--seed 1` | Change the search seed. Ties between equally good schedules are broken by a fixed rule (see "How the market works"), so the schedule normally does not change with the seed. |
 
@@ -116,6 +117,14 @@ What the numbers in the output mean:
   were compensated for taking unpopular ones).
 - **package prices** — the market's valuation of the packages themselves; a negative price on
   `heavy` means people had to be paid to take the 14-hour package.
+- **responded** — `False` for a column with no ranks and no X's. Such a person is scheduled as
+  fully available with no preferences, but their % of ideal, net price and next budget would be
+  nothing but tie-break noise, so they are shown as `n/a` and the report says "no preferences
+  submitted". (The hosted app excludes non-responders from the cycle instead.) % of ideal is
+  also `n/a` for someone who only wrote X's.
+- **WARNINGS** — listed at the end of the people section (and in `solve_sheet`'s `warnings`):
+  non-responders, and with `--min-ranks N` anyone who ranked fewer than N slots. They never stop
+  the solve; the hosted app enforces the minimum, the solver only reports it.
 
 ## The fairness system that is built in
 
