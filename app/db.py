@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 
 from sqlalchemy import create_engine, event
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from app.models import Base
@@ -71,3 +72,21 @@ def connect(url):
     engine = make_engine(url)
     init_db(engine)
     return engine, session_factory(engine)
+
+
+def describe_connection_error(exc, url):
+    """One line describing a failed connection, safe to show on a page: the driver's own
+    message (unwrapped from SQLAlchemy's wrapper) with the URL and its password masked.
+    Streamlit redacts exception text in the browser, so without this the organiser only
+    sees "OperationalError" and has to dig through the logs."""
+    orig = getattr(exc, "orig", None) or exc
+    text = " ".join(str(orig).split()) or type(orig).__name__
+    if url:
+        text = text.replace(url, "<DATABASE_URL>")
+    try:
+        password = make_url(url).password
+    except Exception:
+        password = None
+    if password:
+        text = text.replace(password, "***")
+    return "%s: %s" % (type(orig).__name__, text)

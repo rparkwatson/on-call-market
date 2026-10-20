@@ -146,8 +146,13 @@ SQLite file.
 
 - "This organiser link is not valid": the token is wrong or the cycle was deleted; check
   the saved link for missing characters.
-- An error mentioning `psycopg` or "could not connect": the secret is missing or wrong;
-  re-copy the connection string from Neon and make sure it is inside double quotes.
+- "Could not connect to the database" on the page (with the driver's reason, password
+  masked): the secret is missing or wrong. Re-copy the connection string from Neon's
+  Connect panel with the password revealed, make sure it is inside double quotes, and
+  check that the password has not been reset since. If the reason mentions channel
+  binding or an unsupported parameter, remove `&channel_binding=require` from the string,
+  or use the direct (non `-pooler`) host. The full traceback is in the app logs under
+  **Manage app**.
 - A message that packages could not be derived for this cycle: `packages.py` found no fair
   split for that number of responders over that many weekdays (the message says what
   headcount or shifts-per-day limit would work). Either change the cycle or paste a packages

@@ -724,7 +724,15 @@ def public_view(Session, token):
 # ---------------------------------------------------------------------------
 
 def main():
-    Session = sessions()
+    try:
+        Session = sessions()
+    except Exception as exc:  # the database is unreachable or refuses the credentials
+        url = db.resolve_database_url(_secret_database_url())
+        st.error("Could not connect to the database. " + db.describe_connection_error(exc, url))
+        st.caption("Check the DATABASE_URL secret (the app's Settings > Secrets): the host, user and "
+                   "password must match Neon's Connect panel and the whole string must be inside double "
+                   "quotes. The full error is in the app logs under Manage app.")
+        st.stop()
     params = st.query_params
     if params.get("a"):
         admin_view(Session, params["a"])
