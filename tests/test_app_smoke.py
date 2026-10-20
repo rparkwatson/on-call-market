@@ -51,10 +51,12 @@ def test_landing_page_creates_a_cycle(Session):
 
 
 def test_participant_form_renders_and_saves(Session):
+    """The plain form (?plain=1): one text box per slot.  The default page shows the sheet
+    component instead; tests/test_app_sheet.py covers it."""
     cycle = make_example_cycle(Session, name="Smoke participant", submit=[])
     with Session() as s:
         person = repo.list_participants(s, cycle["id"])[0]
-    at = _app(p=person["token"]).run()
+    at = _app(p=person["token"], plain="1").run()
     assert not at.exception
     assert at.title[0].value == "Smoke participant"
     assert len(at.text_input) == 27  # 9 weekdays x 3 shifts
