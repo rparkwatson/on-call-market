@@ -56,13 +56,16 @@ responders only. If the app says automatic packages are not available for this n
 people and days, paste a packages JSON in the override box (the format is under "Changing
 the system" in README.md) and save it.
 
-Click **Run the market**. Each seed is a full solve, so three seeds take about 30 seconds on
-a laptop and up to three minutes on the free host; stay on the page. The result lists the
-distinct schedules the seeds produced. When two outcomes satisfy the same total preference
-points they are marked **equivalent**: the only difference is who gets which equivalent
-bundle (typically who takes the heavier package), and the choice is yours. For each outcome
-you see the schedule, a table per person (package, hours, late shifts, points, % of ideal,
-net price, violations) and the market status line. Click **Choose this outcome**.
+Click **Run the market**. One solve takes about 10 to 20 seconds on a laptop and up to a
+minute or two on the free host; stay on the page. Several schedules often satisfy the same
+total of preference points; the run lists every one it found, marked **equivalent**. The
+only difference between them is who gets which equivalent bundle (typically who takes the
+heavier package). The market's own choice comes first, picked by a fixed rule: the highest
+minimum % of ideal, then the smallest spread of net price, then the fewest late shifts for
+the person with the most hours. The choice between them is yours. For each outcome you see
+the schedule, a table per person (package, hours, late shifts, points, % of ideal, net
+price, violations), the market status line and any warnings (for example someone who ranked
+fewer slots than the minimum). Click **Choose this outcome**.
 
 What the numbers mean:
 
@@ -72,7 +75,8 @@ What the numbers mean:
 - Net price: points paid for the bundle (positive: they got popular slots; negative: they
   were compensated for taking unpopular ones).
 - Maximum regret: how much better anyone could do by switching bundles at the final prices;
-  below 0.1 is as good as an exact clearing.
+  below 0.1 is as good as an exact clearing. Above 0.5 the prices are indicative only and
+  the outcome says so (the schedule itself is still the best one found).
 
 ## Review and edit tab
 
@@ -115,8 +119,8 @@ Download the CSVs first.
   run the market again.
 - Someone saved after you ran the market (because you reopened): the Run market tab warns
   that preferences changed; run again before choosing.
-- Fewer or more than 7 people, or a period other than 9 weekdays: packages must be derived
-  for that size. Until the automatic package module is in place, paste a packages JSON.
+- Fewer or more than 7 people, or a period other than 9 weekdays: packages are derived for
+  that size automatically. If the Run market tab says they could not be, paste a packages JSON.
 - A participant lost their link: Status tab, **New link**, send the new one.
 - You lost the organiser link: there is no recovery. Create a new cycle (the participants
   will need new links).
