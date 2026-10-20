@@ -167,10 +167,33 @@ of slots. Pass the file with `--packages`.
 `oncall_market.py`: each structure lists its shifts (code, label, time, hours), how codes group
 into categories, which shift is the "late" one and which are "early", and its packages.
 
+## Running the tests
+
+The automated tests live in `tests/` and need only `pytest` (the scheduler itself still has no
+dependencies):
+
+```bash
+python -m pip install pytest
+```
+
+```bash
+python -m pytest -q
+```
+
+The default run takes about a minute. It covers CSV parsing and round trips, the rank-to-points
+conversion, package validation, the constraint and feasibility checks, `best_response` against
+brute force on tiny problems, a full solve of `preferences_example.csv` at seed 1 (same schedule
+every run, regret below 0.1), the command line, and the GUI's helpers and API. Solves of the
+five-block structure take about 25 s each and are marked `slow`: they are skipped by default and
+run with `python -m pytest -q -m slow` (`-m "slow or not slow"` runs everything).
+
 ## Files
 
-- `oncall_market.py` — the scheduler (library and command line).
+- `oncall_market.py` — the scheduler (library and command line). `solve_sheet(text, ...)` is the
+  library entry point: it takes the preferences CSV as text and returns a plain dict (schedule,
+  summary, prices, report); the command line and the browser window both go through it.
 - `oncall_gui.py` — the browser window; needs `oncall_market.py` in the same folder.
+- `tests/`, `pytest.ini` — the automated tests (see "Running the tests").
 - `screenshot_sheet.png`, `screenshot_results.png` — what the window looks like.
 - `preferences_example.csv` — a filled-in example (three-shift structure).
 - `packages_example.json` — the default three-shift packages, ready to edit.
