@@ -63,6 +63,12 @@ NOISE_SEED = 1             # fixed (the default seed), so prices and the search 
 CARRY_OVER_DAMPING = 0.5
 CARRY_OVER_CAP = 25.0
 
+# Search and price support (README, "The five-block structure").  Each annealing restart starts
+# from the market's own demand at the clearing prices, cooled from DEMAND_START_T0; prices that
+# leave a regret above REGRET_SUPPORTED are reported as indicative only.
+DEMAND_START_T0 = 2.0
+REGRET_SUPPORTED = 0.5
+
 
 class SchedulingError(Exception):
     """A problem with the inputs that the user has to fix (reported without a traceback)."""
@@ -702,21 +708,100 @@ def initial_counts(problem, roles, rng):
     raise SchedulingError("Could not find a split of the slots that satisfies the packages.")
 
 
-def anneal(problem, values, avail, roles, iters, rng, t0=8.0, t1=0.02, penalty=1000.0):
+def demand_start(problem, values, avail, roles, prices, rng):
+    """A starting point for anneal() taken from the market: each person's best-response bundle
+    at the prices sets their category counts (repaired at random to meet the supply within the
+    packages) and claims its slots (conflicts resolved at random, the rest filled in).
+    Returns (counts, owner), or None when the repair fails."""
     n, m, C = len(problem.people), len(problem.slots), len(problem.cats)
-    counts = initial_counts(problem, roles, rng)
+    want, counts = [], []
+    for i in range(n):
+        _, bundle = problem.best_response(i, roles[i], prices, values, avail)
+        want.append(set(bundle or []))
+        cnt = [0] * C
+        for j in bundle or []:
+            cnt[problem.slots[j]["cat"]] += 1
+        counts.append(cnt)
+    for c in range(C):
+        for _ in range(10 * m):
+            diff = sum(counts[i][c] for i in range(n)) - problem.supply[c]
+            if diff == 0:
+                break
+            if diff > 0:
+                step = -1
+                cands = [i for i in range(n) if counts[i][c] > problem.packages[roles[i]]["min"][c]
+                         and sum(counts[i]) > problem.packages[roles[i]]["total"][0]]
+                cands = cands or [i for i in range(n) if counts[i][c] > problem.packages[roles[i]]["min"][c]]
+            else:
+                step = 1
+                cands = [i for i in range(n) if counts[i][c] < problem.packages[roles[i]]["max"][c]
+                         and sum(counts[i]) < problem.packages[roles[i]]["total"][1]]
+                cands = cands or [i for i in range(n) if counts[i][c] < problem.packages[roles[i]]["max"][c]]
+            if not cands:
+                return None
+            counts[rng.choice(cands)][c] += step
+        else:
+            return None
+    # totals: move one unit of a category between two people until everyone's total fits
+    pk = [problem.packages[roles[i]] for i in range(n)]
+    for _ in range(10 * m):
+        low = [i for i in range(n) if sum(counts[i]) < pk[i]["total"][0]]
+        high = [i for i in range(n) if sum(counts[i]) > pk[i]["total"][1]]
+        if not low and not high:
+            break
+        if low:
+            i = rng.choice(low)
+            moves = [(c, d) for c in range(C) if counts[i][c] < pk[i]["max"][c] for d in range(n)
+                     if d != i and counts[d][c] > pk[d]["min"][c] and sum(counts[d]) > pk[d]["total"][0]]
+            gain, loss = i, None
+        else:
+            i = rng.choice(high)
+            moves = [(c, d) for c in range(C) if counts[i][c] > pk[i]["min"][c] for d in range(n)
+                     if d != i and counts[d][c] < pk[d]["max"][c] and sum(counts[d]) < pk[d]["total"][1]]
+            gain, loss = None, i
+        if not moves:
+            return None
+        c, d = rng.choice(moves)
+        counts[gain if gain is not None else d][c] += 1
+        counts[loss if loss is not None else d][c] -= 1
+    else:
+        return None
     owner = [None] * m
+    need = [list(cnt) for cnt in counts]
+    order = list(range(m))
+    rng.shuffle(order)
+    for pass_ in (0, 1):  # demanded slots first, then whoever still needs that category
+        for j in order:
+            if owner[j] is not None:
+                continue
+            c = problem.slots[j]["cat"]
+            takers = [i for i in range(n) if need[i][c] > 0 and (pass_ or j in want[i])]
+            if takers:
+                i = rng.choice(takers)
+                owner[j], need[i][c] = i, need[i][c] - 1
+    return counts, owner
+
+
+def anneal(problem, values, avail, roles, iters, rng, t0=8.0, t1=0.02, penalty=1000.0, start=None):
+    """Simulated annealing over assignments that respect the packages; `start` is an optional
+    (counts, owner) from demand_start(), otherwise the split is random."""
+    n, m, C = len(problem.people), len(problem.slots), len(problem.cats)
     by_cat = [[] for _ in range(C)]
     for j, s in enumerate(problem.slots):
         by_cat[s["cat"]].append(j)
-    for c in range(C):
-        pool = list(by_cat[c])
-        rng.shuffle(pool)
-        k = 0
-        for i in range(n):
-            for _ in range(counts[i][c]):
-                owner[pool[k]] = i
-                k += 1
+    if start is None:
+        counts = initial_counts(problem, roles, rng)
+        owner = [None] * m
+        for c in range(C):
+            pool = list(by_cat[c])
+            rng.shuffle(pool)
+            k = 0
+            for i in range(n):
+                for _ in range(counts[i][c]):
+                    owner[pool[k]] = i
+                    k += 1
+    else:
+        counts, owner = [list(cnt) for cnt in start[0]], list(start[1])
     mine = [set() for _ in range(n)]
     for j in range(m):
         mine[owner[j]].add(j)
@@ -993,7 +1078,12 @@ def solve(problem, values, avail, market_roles=True, roles=None, iters=400, step
         found = []
         for cand in candidates:
             for r in range(restarts):
-                o, v = anneal(problem, values, avail, cand, sa_iters, random.Random(seed + 17 * r))
+                rng = random.Random(seed + 17 * r)
+                start = demand_start(problem, values, avail, cand, prices, rng)
+                if start is None:
+                    o, v = anneal(problem, values, avail, cand, sa_iters, rng)
+                else:
+                    o, v = anneal(problem, values, avail, cand, sa_iters, rng, t0=DEMAND_START_T0, start=start)
                 o, v, _ = pair_polish(problem, values, avail, cand, o)
                 found.append((v, list(cand), o))
         log("Looking for welfare-equivalent alternatives ...")
@@ -1012,7 +1102,7 @@ def solve(problem, values, avail, market_roles=True, roles=None, iters=400, step
             iters=2 * iters, step0=step / 10.0, decay=5.0 * decay)
     return {"roles": roles, "owner": owner, "prices": prices, "pkg_prices": pkg_prices,
             "cleared": cleared, "rounds": rounds, "max_regret": max_regret, "market_roles": market_roles,
-            "alternatives": alternatives}
+            "alternatives": alternatives, "prices_supported": bool(cleared or max_regret <= REGRET_SUPPORTED)}
 
 
 def next_budget(net_price):
@@ -1126,11 +1216,25 @@ def build_report(problem, values, avail, result):
     if cleared:
         out.append("Market status: cleared exactly in %d rounds - every person holds the bundle they would pick for" % rounds)
         out.append("themselves at these prices, and every slot has exactly one taker.")
-    else:
+    elif prices_supported(result):
         out.append("Market status: prices from %d rounds support the assignment with a maximum regret of %.2f points"
                    % (rounds, max_regret))
         out.append("(regret = how much better any one person could do by switching bundles at these prices; 0 = exact equilibrium).")
+    else:
+        out.append("Market status: the prices are indicative only - after %d rounds they leave a maximum regret of %.2f points"
+                   % (rounds, max_regret))
+        out.append("(regret = how much better any one person could do by switching bundles at these prices; 0 = exact equilibrium).")
+        out.append("No price vector was found that makes this schedule everyone's own best choice. The prices still show who")
+        out.append("is compensated and for what, and the schedule itself is the best found; see README, \"The five-block structure\".")
     return "\n".join(out), rows, schedule_rows
+
+
+def prices_supported(result):
+    """True when the prices support the assignment: an exact clearing, or a regret within
+    REGRET_SUPPORTED (results built by other callers may lack the key, so it is recomputed)."""
+    if "prices_supported" in result:
+        return bool(result["prices_supported"])
+    return bool(result["cleared"] or result["max_regret"] <= REGRET_SUPPORTED)
 
 
 def write_outputs(problem, values, avail, result, out_dir):
@@ -1217,6 +1321,7 @@ def solution_dict(problem, values, avail, result):
         "cleared": bool(result["cleared"]),
         "rounds": int(result["rounds"]),
         "max_regret": float(result["max_regret"]),
+        "prices_supported": prices_supported(result),
         "market_roles": bool(result["market_roles"]),
         "report": text,
         "warnings": list(getattr(problem, "warnings", None) or []),
@@ -1278,6 +1383,10 @@ def solve_sheet(text, *, structure=None, mode="rank", roles=None, packages=None,
       rounds          price-adjustment rounds used
       max_regret      the most anyone could gain by switching bundles at the final prices
                       (0.0 for an exact clearing)
+      prices_supported
+                      True when the prices support the schedule (an exact clearing, or
+                      max_regret within REGRET_SUPPORTED = 0.5); False means the prices are
+                      indicative only, which the report also says (the five-block structure)
       market_roles    False when roles were fixed
       report          the text report the `solve` command prints
       warnings        [sentence, ...] about non-responders and, with min_ranks, people who

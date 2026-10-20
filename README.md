@@ -151,6 +151,26 @@ Built-in packages per structure:
 | single | heavy7 | 3 | one of each block + two extra midday blocks | 14 |
 | single | light6 | 4 | one of each block + one extra 8 am or 6 pm block | 12 |
 
+## The five-block structure
+
+With five separate 2-hour blocks a day the assignment search is much harder than with two or
+three shifts (45 slots, five categories, tight packages), and clearing prices can only support
+an assignment that is truly welfare-maximising: the gap between the best assignment found and
+the market's upper bound (the smallest dual value seen while adjusting prices) is exactly the
+sum of everyone's regrets. On the demo sheet (`demo --structure single`) the price loop never
+reduced the regret below about 6 points whatever the step size or number of rounds, because
+the annealing restarts themselves spread over 20 to 30 points and the best of them sat 8 points
+below the bound. Every restart therefore now starts from the market's own demand at the
+clearing prices (each person's best bundle, repaired to fit the packages) and cools from a lower
+temperature. On the demo the best total rose from 298 to 303 points against a bound of 305 and
+the regret fell from 5.7 to about 0.6 points, in about the same time; the three-shift example
+keeps its total (316.4 points) and regret (0.03) with a slightly faster search. A regret above
+0.5 points still means no price vector makes the schedule everyone's own best choice, so the
+report then calls the prices "indicative only" and `solve_sheet` returns `prices_supported:
+false`: the schedule is the best found, the prices show who is compensated and for what, but
+someone could gain a little by switching at them. Different seeds can also still land on
+different near-optimal five-block schedules (totals 303.05 and 303.19 on the demo).
+
 ## Carrying fairness across cycles
 
 If this rotation repeats, the simplest fix for a one-off imbalance is to run the next cycle with

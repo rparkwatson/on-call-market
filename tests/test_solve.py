@@ -10,7 +10,8 @@ import oncall_market as om
 from tests.helpers import check_rules, check_schedule, default_problem
 
 SOLUTION_KEYS = {"structure", "people", "dates", "schedule", "summary", "prices", "package_prices",
-                 "cleared", "rounds", "max_regret", "market_roles", "report", "alternatives", "warnings"}
+                 "cleared", "rounds", "max_regret", "market_roles", "report", "alternatives", "warnings",
+                 "prices_supported"}
 SUMMARY_KEYS = ["person", "package", "shifts", "hours", "points_received", "pct_of_ideal", "net_price",
                 "next_budget_suggestion", "violations", "slots", "responded"]
 FIXED_ROLES = {"Person A": "heavy", "Person B": "heavy", "Person C": "heavy", "Person D": "light_evenings",
@@ -54,6 +55,8 @@ class TestExampleEndToEnd:
 
     def test_regret_is_below_a_tenth_of_a_point(self, example_solution):
         assert 0.0 <= example_solution["max_regret"] < 0.1
+        assert example_solution["prices_supported"] is True
+        assert "indicative only" not in example_solution["report"]
         if not example_solution["cleared"]:
             assert "maximum regret of %.2f points" % example_solution["max_regret"] in example_solution["report"]
 
@@ -199,6 +202,9 @@ class TestDemo:
     def test_demo_five_blocks_solves_without_violations(self):
         sol = self.demo_solution("single")
         assert sorted(r["hours"] for r in sol["summary"]) == [12.0] * 4 + [14.0] * 3
+        # the five-block prices cannot be made to support the schedule (README): say so honestly
+        assert sol["prices_supported"] == (sol["cleared"] or sol["max_regret"] <= om.REGRET_SUPPORTED)
+        assert ("indicative only" in sol["report"]) == (not sol["prices_supported"])
 
 
 class TestEntryPointMatchesCommandLine:
