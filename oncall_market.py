@@ -723,18 +723,26 @@ def initial_counts(problem, roles, rng):
     raise SchedulingError("Could not find a split of the slots that satisfies the packages.")
 
 
-def demand_start(problem, values, avail, roles, prices, rng):
+def demand_start(problem, values, avail, roles, prices, rng, bundles=None):
     """A starting point for anneal() taken from the market: each person's best-response bundle
     at the prices sets their category counts (repaired at random to meet the supply within the
     packages) and claims its slots (conflicts resolved at random, the rest filled in).
+    `bundles` is an optional {(person, package): slots} cache shared across restarts and role
+    sets, since the prices are the same for all of them.
     Returns (counts, owner), or None when the repair fails."""
     n, m, C = len(problem.people), len(problem.slots), len(problem.cats)
     want, counts = [], []
     for i in range(n):
-        _, bundle = problem.best_response(i, roles[i], prices, values, avail)
-        want.append(set(bundle or []))
+        key = (i, roles[i])
+        if bundles is None or key not in bundles:
+            bundle = problem.best_response(i, roles[i], prices, values, avail)[1] or []
+            if bundles is not None:
+                bundles[key] = bundle
+        else:
+            bundle = bundles[key]
+        want.append(set(bundle))
         cnt = [0] * C
-        for j in bundle or []:
+        for j in bundle:
             cnt[problem.slots[j]["cat"]] += 1
         counts.append(cnt)
     for c in range(C):
@@ -1093,11 +1101,11 @@ def solve(problem, values, avail, market_roles=True, roles=None, iters=400, step
     else:
         log("Assigning shifts (welfare-maximising search) ...")
         candidates = candidate_roles(problem, values, avail, prices, pkg_prices, top=5) if market_roles else [roles]
-        found = []
+        found, bundles = [], {}
         for cand in candidates:
             for r in range(restarts):
                 rng = random.Random(seed + 17 * r)
-                start = demand_start(problem, values, avail, cand, prices, rng)
+                start = demand_start(problem, values, avail, cand, prices, rng, bundles)
                 if start is None:
                     o, v = anneal(problem, values, avail, cand, sa_iters, rng)
                 else:

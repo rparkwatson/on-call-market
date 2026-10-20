@@ -163,8 +163,8 @@ the annealing restarts themselves spread over 20 to 30 points and the best of th
 below the bound. Every restart therefore now starts from the market's own demand at the
 clearing prices (each person's best bundle, repaired to fit the packages) and cools from a lower
 temperature. On the demo the best total rose from 298 to 303 points against a bound of 305 and
-the regret fell from 5.7 to about 0.6 points, in about the same time; the three-shift example
-keeps its total (316.4 points) and regret (0.03) with a slightly faster search. A regret above
+the regret fell from 5.7 to about 0.6 points, in 20 s instead of 26 s; the three-shift example
+keeps its total (316.4 points) and regret (0.03) in 7 s as before. A regret above
 0.5 points still means no price vector makes the schedule everyone's own best choice, so the
 report then calls the prices "indicative only" and `solve_sheet` returns `prices_supported:
 false`: the schedule is the best found, the prices show who is compensated and for what, but
