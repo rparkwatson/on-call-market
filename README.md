@@ -58,7 +58,7 @@ python oncall_market.py solve preferences_example.csv
 | `--max-per-day 2` | Allow someone two shifts on the same day (default 1). |
 | `--budgets budgets.csv` | Give some people more than 100 points (see "Carrying fairness across cycles"). |
 | `--packages packages.json` | Replace the built-in packages (see "Changing the system"). |
-| `--seed 1` | Change the tie-breaking / search seed. |
+| `--seed 1` | Change the search seed. Ties between equally good schedules are broken by a fixed rule (see "How the market works"), so the schedule normally does not change with the seed. |
 
 ## Filling in the sheet
 
@@ -98,6 +98,14 @@ impossible (the program will tell you which day is short-handed).
    remaining **regret** — how much better anyone could do by switching at the final prices.
    Values below about 0.1 points mean the prices are, for practical purposes, true clearing
    prices.
+5. **Ties.** Several schedules often satisfy the same total of preference points (for example
+   two people who are equally happy either way, one of whom must take the 14-hour package). The
+   program collects every schedule it finds whose total is within 0.05 points of the best, lists
+   them in the report ("Ties: 3 equivalent schedules ...") and in `solve_sheet`'s `alternatives`,
+   and picks one by a fixed rule: the highest minimum "% of ideal" across people, then the
+   smallest spread of net price, then the fewest late shifts for the person with the most hours,
+   then the first in slot order. The rule does not depend on the random seed, so the same sheet
+   gives the same schedule whatever `--seed` is used; the seed only steers the search.
 
 What the numbers in the output mean:
 

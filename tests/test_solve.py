@@ -10,7 +10,7 @@ import oncall_market as om
 from tests.helpers import check_rules, check_schedule, default_problem
 
 SOLUTION_KEYS = {"structure", "people", "dates", "schedule", "summary", "prices", "package_prices",
-                 "cleared", "rounds", "max_regret", "market_roles", "report"}
+                 "cleared", "rounds", "max_regret", "market_roles", "report", "alternatives"}
 SUMMARY_KEYS = ["person", "package", "shifts", "hours", "points_received", "pct_of_ideal", "net_price",
                 "next_budget_suggestion", "violations", "slots"]
 FIXED_ROLES = {"Person A": "heavy", "Person B": "heavy", "Person C": "heavy", "Person D": "light_evenings",

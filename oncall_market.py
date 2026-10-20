@@ -48,6 +48,16 @@ from datetime import date, timedelta
 
 BUDGET = 100.0  # every person's preferences are scaled to this many points
 
+# Tie handling (README, "How the market works").  Schedules whose total preference points are
+# within TIE_TOLERANCE of the best are welfare-equivalent; the final one is chosen by TIE_RULE.
+TIE_TOLERANCE = 0.05
+TIE_RULE = ("the highest minimum % of ideal, then the smallest spread of net price, then the fewest "
+            "late shifts for the person with the most hours, then the first in slot order")
+MAX_ALTERNATIVES = 40      # equivalent schedules kept
+MAX_TIE_EXPANSIONS = 12    # equivalent schedules whose pair-move neighbours are explored
+NOISE = 1e-6               # per-slot tie-break noise added to the point values
+NOISE_SEED = 1             # fixed (the default seed), so prices and the search inputs do not depend on the solve seed
+
 
 class SchedulingError(Exception):
     """A problem with the inputs that the user has to fix (reported without a traceback)."""
@@ -448,7 +458,7 @@ def preference_values(problem, slot_rows, mode, rng, budgets=None):
             for j in raw[i]:
                 values[i][j] *= budget / tot
         for j in range(m):  # tiny deterministic tie-break noise
-            values[i][j] += rng.uniform(0.0, 1e-3)
+            values[i][j] += rng.uniform(0.0, NOISE)
     return values, avail
 
 
@@ -777,13 +787,155 @@ def pair_polish(problem, values, avail, roles, owner, penalty=1000.0, max_sweeps
 
 
 # ---------------------------------------------------------------------------
+# Welfare-equivalent alternatives and the tie-break rule (finding F1)
+# ---------------------------------------------------------------------------
+
+def bundle_fits(problem, pkg, slots_i):
+    """True when the slots satisfy the package's per-category and total counts."""
+    pk = problem.packages[pkg]
+    counts = [0] * len(problem.cats)
+    for j in slots_i:
+        counts[problem.slots[j]["cat"]] += 1
+    return all(pk["min"][c] <= counts[c] <= pk["max"][c] for c in range(len(problem.cats))) and \
+        pk["total"][0] <= len(slots_i) <= pk["total"][1]
+
+
+def bundle_score(problem, values, avail, i, slots_i, penalty=1000.0):
+    """Points person i collects from slots_i, less the penalty for every broken rule."""
+    return sum(values[i][j] for j in slots_i) - penalty * problem.violations(i, slots_i, avail)
+
+
+def pair_alternatives(problem, values, avail, roles, owner, threshold, market_roles, penalty=1000.0):
+    """Assignments scoring at least `threshold` that differ from (roles, owner) for one pair of
+    people: their pooled slots are re-split, with their packages kept or, when the market hands
+    out the packages, swapped.  Yields (total, roles, owner)."""
+    n = len(problem.people)
+    mine = [[] for _ in range(n)]
+    for j, i in enumerate(owner):
+        mine[i].append(j)
+    scores = [bundle_score(problem, values, avail, i, mine[i], penalty) for i in range(n)]
+    total = sum(scores)
+    for a in range(n):
+        for b in range(a + 1, n):
+            pool = sorted(mine[a] + mine[b])
+            rest = total - scores[a] - scores[b]
+            need = threshold - rest - 1e-9
+            arrangements = [(roles[a], roles[b])]
+            if market_roles and roles[a] != roles[b]:
+                arrangements.append((roles[b], roles[a]))
+            for ra, rb in arrangements:
+                ta = problem.packages[ra]["total"]
+                for size in range(ta[0], min(ta[1], len(pool)) + 1):
+                    for sa in itertools.combinations(pool, size):
+                        if not bundle_fits(problem, ra, sa):
+                            continue
+                        chosen = set(sa)
+                        sb = [j for j in pool if j not in chosen]
+                        if not bundle_fits(problem, rb, sb):
+                            continue
+                        v = bundle_score(problem, values, avail, a, sa, penalty) + \
+                            bundle_score(problem, values, avail, b, sb, penalty)
+                        if v < need or (ra == roles[a] and list(sa) == mine[a]):
+                            continue
+                        new_roles = list(roles)
+                        new_roles[a], new_roles[b] = ra, rb
+                        new_owner = list(owner)
+                        for j in sa:
+                            new_owner[j] = a
+                        for j in sb:
+                            new_owner[j] = b
+                        yield rest + v, new_roles, new_owner
+
+
+def equivalent_assignments(problem, values, avail, found, market_roles, tol=TIE_TOLERANCE,
+                           limit=MAX_ALTERNATIVES, expansions=MAX_TIE_EXPANSIONS):
+    """The welfare-equivalent assignments: every distinct (roles, owner) in `found`
+    [(total, roles, owner), ...] whose total is within tol of the best, plus the pair-move
+    neighbours of the first `expansions` of them (at most `limit` in all).  Best first."""
+    pool, order = {}, []
+
+    def add(total, roles, owner):
+        key = (tuple(roles), tuple(owner))
+        if key in pool:
+            return False
+        pool[key] = (total, list(roles), list(owner))
+        order.append(key)
+        return True
+
+    for total, roles, owner in sorted(found, key=lambda x: -x[0]):
+        add(total, roles, owner)
+    best = max(t for t, _, _ in pool.values())
+    expanded = qi = 0
+    while qi < len(order) and expanded < expansions and len(pool) < limit:
+        total, roles, owner = pool[order[qi]]
+        qi += 1
+        if best - total > tol:
+            continue
+        expanded += 1
+        for total2, roles2, owner2 in pair_alternatives(problem, values, avail, roles, owner, best - tol, market_roles):
+            if add(total2, roles2, owner2):
+                best = max(best, total2)
+            if len(pool) >= limit:
+                break
+    ties = [t for t in pool.values() if best - t[0] <= tol]
+    ties.sort(key=lambda t: -t[0])
+    return ties
+
+
+def ideal_points(problem, values, avail, market_roles, roles):
+    """The best each person could score with nobody else in the way (within their package, or
+    any package when the market hands them out)."""
+    zero = [0.0] * len(problem.slots)
+    pkgs = list(problem.packages.keys())
+    return [max((problem.best_response(i, k, zero, values, avail)[0] or 0.0)
+                for k in (pkgs if market_roles else [roles[i]]))
+            for i in range(len(problem.people))]
+
+
+def tie_break_key(problem, values, roles, owner, prices, pkg_prices, market_roles, ideal, counted=None):
+    """Sort key implementing TIE_RULE (smaller is better).  `counted` marks the people whose
+    % of ideal is meaningful (non-responders are left out of the minimum)."""
+    n = len(problem.people)
+    mine = [[] for _ in range(n)]
+    for j, i in enumerate(owner):
+        mine[i].append(j)
+    pct, net, hours, late = [], [], [], []
+    for i in range(n):
+        pts = sum(values[i][j] for j in mine[i])
+        pct.append(pts / ideal[i] * 100.0 if ideal[i] > 1e-9 else 100.0)
+        net.append(sum(prices[j] for j in mine[i]) + (pkg_prices[roles[i]] if market_roles else 0.0))
+        hours.append(sum(problem.slots[j]["hours"] for j in mine[i]))
+        late.append(sum(1 for j in mine[i] if problem.slots[j]["code"] == problem.late))
+    counted = [i for i in range(n) if counted is None or counted[i]] or list(range(n))
+    most = max(hours)
+    return (-round(min(pct[i] for i in counted), 2), round(max(net) - min(net), 2),
+            max(late[i] for i in range(n) if abs(hours[i] - most) < 1e-9), tuple(owner))
+
+
+def describe_alternative(problem, roles, owner, total, chosen):
+    """A plain-dict summary of one assignment: who owns each slot (indices), packages, points, hours."""
+    hours = {p: 0.0 for p in problem.people}
+    late = {p: 0 for p in problem.people}
+    for j, i in enumerate(owner):
+        hours[problem.people[i]] += problem.slots[j]["hours"]
+        if problem.slots[j]["code"] == problem.late:
+            late[problem.people[i]] += 1
+    return {"owner": list(owner), "roles": list(roles), "total_points": round(total, 3),
+            "hours": hours, "late_shifts": late, "chosen": bool(chosen)}
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
 def solve(problem, values, avail, market_roles=True, roles=None, iters=400, step=3.0, decay=40.0,
           sa_iters=40000, restarts=4, seed=1, log=None):
     """Run the whole pipeline.  Returns a dict with roles, owner (slot -> person index),
-    prices, pkg_prices, cleared, rounds and max_regret."""
+    prices, pkg_prices, cleared, rounds, max_regret, market_roles and alternatives (the
+    welfare-equivalent assignments, see describe_alternative; the chosen one is flagged).
+
+    The seed drives only the assignment search (the annealing restarts): the point values,
+    the clearing prices and the tie-break rule do not depend on it."""
     log = log or (lambda s: None)
     if not market_roles:
         validate_roles(problem, roles)
@@ -798,23 +950,54 @@ def solve(problem, values, avail, market_roles=True, roles=None, iters=400, step
             for j in bundle:
                 owner[j] = i
         max_regret = 0.0
+        total = sum(values[owner[j]][j] for j in range(len(problem.slots)))
+        alternatives = [describe_alternative(problem, roles, owner, total, True)]
     else:
         log("Assigning shifts (welfare-maximising search) ...")
         candidates = candidate_roles(problem, values, avail, prices, pkg_prices, top=5) if market_roles else [roles]
-        best_owner, best_roles, best_val = None, None, NEG
+        found = []
         for cand in candidates:
             for r in range(restarts):
                 o, v = anneal(problem, values, avail, cand, sa_iters, random.Random(seed + 17 * r))
                 o, v, _ = pair_polish(problem, values, avail, cand, o)
-                if v > best_val:
-                    best_owner, best_roles, best_val = o, cand, v
-        owner, roles = best_owner, best_roles
+                found.append((v, list(cand), o))
+        log("Looking for welfare-equivalent alternatives ...")
+        ties = equivalent_assignments(problem, values, avail, found, market_roles)
+        ideal = ideal_points(problem, values, avail, market_roles, ties[0][1])
+        counted = getattr(problem, "responded", None)
+        ties.sort(key=lambda t: tie_break_key(problem, values, t[1], t[2], prices, pkg_prices, market_roles,
+                                              ideal, counted))
+        _, roles, owner = ties[0]
+        alternatives = [describe_alternative(problem, r, o, v, k == 0) for k, (v, r, o) in enumerate(ties)]
+        if len(ties) > 1:
+            log("  %d equivalent schedules (total points within %g); chosen by %s" % (len(ties), TIE_TOLERANCE, TIE_RULE))
         log("Refining prices to support the assignment ...")
         prices, pkg_prices, max_regret = support_prices(
             problem, values, avail, roles, owner, prices, pkg_prices, market_roles,
             iters=2 * iters, step0=step / 10.0, decay=5.0 * decay)
     return {"roles": roles, "owner": owner, "prices": prices, "pkg_prices": pkg_prices,
-            "cleared": cleared, "rounds": rounds, "max_regret": max_regret, "market_roles": market_roles}
+            "cleared": cleared, "rounds": rounds, "max_regret": max_regret, "market_roles": market_roles,
+            "alternatives": alternatives}
+
+
+def ties_lines(problem, result):
+    """The report's account of welfare-equivalent schedules and how the final one was chosen."""
+    alts = result.get("alternatives")
+    if not alts:
+        return []
+    if len(alts) == 1:
+        return ["  Ties: none (no other schedule found within %g points of the best)." % TIE_TOLERANCE]
+    chosen = next(a for a in alts if a["chosen"])
+    out = ["  Ties: %d equivalent schedules (total points within %g); chosen by %s."
+           % (len(alts), TIE_TOLERANCE, TIE_RULE)]
+    for k, alt in enumerate(a for a in alts if not a["chosen"]):
+        moved = sum(1 for j in range(len(alt["owner"])) if alt["owner"][j] != chosen["owner"][j])
+        changed = ["%s %s %g h" % (p, alt["roles"][i], alt["hours"][p]) for i, p in enumerate(problem.people)
+                   if alt["roles"][i] != chosen["roles"][i] or alt["hours"][p] != chosen["hours"][p]]
+        out.append("    alternative %d (%.1f pts): %s hands; %s"
+                   % (k + 2, alt["total_points"], "1 slot changes" if moved == 1 else "%d slots change" % moved,
+                      ", ".join(changed) if changed else "same packages and hours"))
+    return out
 
 
 def build_report(problem, values, avail, result):
@@ -851,13 +1034,13 @@ def build_report(problem, values, avail, result):
     out.append("         ideal = the best they could have done with no one else in the way)")
     rows = []
     total_pts = 0.0
+    ideals = ideal_points(problem, values, avail, market_roles, roles)
     for i in range(n):
         hours = sum(problem.slots[j]["hours"] for j in mine[i])
         pts = sum(values[i][j] for j in mine[i])
         total_pts += pts
         paid = sum(prices[j] for j in mine[i]) + (pkg_prices[roles[i]] if market_roles else 0.0)
-        ideal = max((problem.best_response(i, k, zero, values, avail)[0] or 0.0)
-                    for k in (pkgs if market_roles else [roles[i]]))
+        ideal = ideals[i]
         share = (pts / ideal * 100.0) if ideal > 1e-9 else 100.0
         viol = problem.violations(i, mine[i], avail)
         shifts = ", ".join("%s %s" % (fmt_date(problem.slots[j]["date"]), problem.slots[j]["code"]) for j in mine[i])
@@ -870,6 +1053,7 @@ def build_report(problem, values, avail, result):
                      "next_budget_suggestion": round(BUDGET - paid, 1),
                      "violations": viol, "slots": " ".join(problem.slots[j]["id"] for j in mine[i])})
     out.append("  total preference points satisfied: %.1f" % total_pts)
+    out.extend(ties_lines(problem, result))
     if any(r["violations"] for r in rows):
         out.append("")
         out.append("  WARNING: the best schedule found still breaks a rule (see CONSTRAINT VIOLATIONS above).")
@@ -938,7 +1122,9 @@ def prepare_sheet(text, *, structure=None, mode="rank", packages=None, max_per_d
         unknown = sorted(set(budgets) - set(people))
         if unknown:
             raise SchedulingError("Budgets name people not in the preferences file: %s" % ", ".join(unknown))
-    values, avail = preference_values(problem, slot_rows, mode, random.Random(seed), budgets)
+    # The tie-break noise uses a fixed seed: the clearing prices and the search inputs are then the
+    # same for every solve seed, and the seed only drives the assignment search (see solve()).
+    values, avail = preference_values(problem, slot_rows, mode, random.Random(NOISE_SEED), budgets)
     return problem, values, avail
 
 
@@ -971,6 +1157,12 @@ def solution_dict(problem, values, avail, result):
         "max_regret": float(result["max_regret"]),
         "market_roles": bool(result["market_roles"]),
         "report": text,
+        "alternatives": [
+            {"owner": [problem.people[i] for i in alt["owner"]],
+             "roles": {problem.people[i]: alt["roles"][i] for i in range(len(problem.people))},
+             "total_points": alt["total_points"], "hours": dict(alt["hours"]),
+             "late_shifts": dict(alt["late_shifts"]), "chosen": alt["chosen"]}
+            for alt in result.get("alternatives", [])],
     }
 
 
@@ -1019,6 +1211,16 @@ def solve_sheet(text, *, structure=None, mode="rank", roles=None, packages=None,
                       (0.0 for an exact clearing)
       market_roles    False when roles were fixed
       report          the text report the `solve` command prints
+      alternatives    the welfare-equivalent schedules (total preference points within
+                      TIE_TOLERANCE of the best), best-ranked first, each
+                      {owner: [person per slot in schedule order], roles: {person: package},
+                       total_points, hours: {person: h}, late_shifts: {person: n}, chosen}.
+                      Exactly one has chosen True: the schedule above, picked by TIE_RULE.
+                      A single entry means no equivalent alternative was found.
+
+    The seed drives only the assignment search: the point values (and so the clearing prices)
+    are the same for every seed, and welfare-equivalent schedules are ranked by TIE_RULE, so
+    different seeds normally give the same schedule.
 
     Raises SchedulingError for anything the user has to fix (bad sheet, impossible X's,
     packages that do not add up, a wrong roles mapping).
