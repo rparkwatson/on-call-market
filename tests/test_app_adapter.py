@@ -226,8 +226,8 @@ def test_status_line_wording():
         "Prices support this assignment with a maximum regret of 0.69 points")
     line = sa.status_line(dict(base, prices_supported=False, warnings=["Person A ranked 2 slots; the minimum is 6."]))
     assert line.startswith("The prices leave a maximum regret of 0.69 points")
-    assert "Prices are indicative only: the regret exceeds 0.5 points." in line
-    assert line.endswith(" WARNING: Person A ranked 2 slots; the minimum is 6.")
+    assert line.split(" WARNING: ")[1:] == ["Prices are indicative only: the regret exceeds 0.5 points.",
+                                           "Person A ranked 2 slots; the minimum is 6."]
     cleared = sa.status_line({"cleared": True, "rounds": 12, "max_regret": 0.0, "summary": [], "prices_supported": True})
     assert cleared.startswith("The market cleared exactly in 12 rounds") and "WARNING" not in cleared
 
@@ -304,6 +304,14 @@ def test_grid_from_schedule(example_run):
     skipped = [r for r in cand["schedule"] if r["date"] != "2026-11-11"]
     grid2 = sa.grid_from_schedule(skipped, "three")
     assert len(grid2["rows"]) == 9 and grid2["rows"][7][0] == "no coverage Wed Nov 11"
+
+
+def test_tie_rule_from_report(example_run):
+    cands = example_run["outcome"]["candidates"]
+    assert sa.tie_rule_from_report(cands[0]["report"]) == om.TIE_RULE
+    assert sa.tie_rule_from_report(cands[1]["report"]) is None  # an alternative's report has no Ties line
+    assert sa.tie_rule_from_report("") is None and sa.tie_rule_from_report(None) is None
+    assert sa.tie_rule_from_report("  Ties: none (no other schedule found within 0.05 points of the best).") is None
 
 
 def test_edits_csv_text():

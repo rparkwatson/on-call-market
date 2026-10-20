@@ -229,8 +229,9 @@ def exact_point_values(problem, text, mode, budgets):
 
 
 def status_line(solution):
-    """How the market ended, in one line: the clearing status, whether the prices only
-    indicate, a rule-violation warning and the solver's own warnings (min_ranks)."""
+    """How the market ended, in one line: the clearing status, then every warning (indicative
+    prices, a rule violation, the solver's own warnings about min_ranks) each introduced by
+    " WARNING: " so that the dashboard can show them apart."""
     supported = solution.get("prices_supported", True) is not False
     if solution["cleared"]:
         status = ("The market cleared exactly in %d rounds: everyone holds the bundle they would pick for "
@@ -240,7 +241,7 @@ def status_line(solution):
                   "(0 = exact equilibrium; under %.1f is as good as exact)." % (solution["max_regret"], REGRET_OK))
     else:
         status = ("The prices leave a maximum regret of %.2f points (0 = exact equilibrium; under %.1f is as "
-                  "good as exact). Prices are indicative only: the regret exceeds %g points."
+                  "good as exact). WARNING: Prices are indicative only: the regret exceeds %g points."
                   % (solution["max_regret"], REGRET_OK, om.REGRET_SUPPORTED))
     if any(r["violations"] for r in solution["summary"]):
         status += (" WARNING: the best schedule found still breaks a rule - usually the X's leave a day "
@@ -470,6 +471,16 @@ def _between(a, b):
 def grid_table(grid):
     """The grid as a list of dicts (what st.table takes)."""
     return [dict(zip(grid["columns"], row)) for row in grid["rows"]]
+
+
+def tie_rule_from_report(report):
+    """The tie-break rule as the solution report states it ("Ties: N equivalent schedules
+    (...); chosen by <rule>."), or None when the report has no such line."""
+    for line in (report or "").splitlines():
+        line = line.strip()
+        if line.startswith("Ties:") and "; chosen by " in line:
+            return line.split("; chosen by ", 1)[1].rstrip(".")
+    return None
 
 
 def edits_csv_text(edits):

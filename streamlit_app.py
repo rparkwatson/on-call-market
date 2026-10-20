@@ -398,17 +398,13 @@ def run_tab(Session, cycle, run):
             st.rerun()
 
     st.subheader("Run")
-    n_seeds = st.number_input("Seeds to try", 1, 5, 3,
-                              help="Each seed is a full solve. Different seeds can give different but equally good "
-                                   "schedules; you choose between them below.")
-    st.caption("Takes about 10 seconds per seed on a laptop and up to a minute per seed on the free host. "
-               "Stay on this page until it finishes.")
+    st.caption("One solve finds the clearing prices, the schedule and every schedule that is equally good. "
+               "It takes about 10 to 20 seconds on a laptop and up to a minute or two on the free host; "
+               "stay on this page until it finishes.")
     if st.button("Run the market", type="primary", disabled=packages["packages"] is None or not responders):
-        seeds = tuple(range(1, int(n_seeds) + 1))
-        with st.spinner("Finding clearing prices and assigning shifts for %d seed%s ..."
-                        % (len(seeds), "s" if len(seeds) > 1 else "")):
+        with st.spinner("Finding clearing prices, assigning shifts and looking for equivalent schedules ..."):
             try:
-                outcome = sa.run_market(cycle, participants, submissions, packages["packages"], seeds=seeds)
+                outcome = sa.run_market(cycle, participants, submissions, packages["packages"])
             except om.SchedulingError as e:
                 st.error(str(e))
                 return
@@ -417,30 +413,37 @@ def run_tab(Session, cycle, run):
                   "mode": cycle["mode"], "min_ranks": cycle["min_ranks"], "people": outcome["responders"],
                   "budgets": outcome["budgets"]}
         with Session() as s:
-            repo.create_run(s, cycle["id"], seeds=list(seeds), params=params, candidates=outcome["candidates"],
-                            excluded_names=outcome["excluded"],
+            repo.create_run(s, cycle["id"], seeds=outcome["candidates"][0]["seeds"], params=params,
+                            candidates=outcome["candidates"], excluded_names=outcome["excluded"],
                             packages_used={"source": packages["source"], "packages": packages["packages"]})
-        st.session_state["flash"] = "Run finished: %d distinct outcome%s. Choose one below." % (
-            len(outcome["candidates"]), "s" if len(outcome["candidates"]) != 1 else "")
+        n = len(outcome["candidates"])
+        st.session_state["flash"] = ("Run finished: one schedule, no equivalent alternative. Choose it below."
+                                     if n == 1 else "Run finished: %d equivalent schedules. Choose one below." % n)
         st.rerun()
     if run:
         show_candidates(Session, cycle, run, participants, locked=False)
 
 
 def show_candidates(Session, cycle, run, participants, locked):
-    st.subheader("Outcomes of the run at %s (seeds %s)" % (fmt_dt(run["created_at"]), ", ".join(map(str, run["seeds"]))))
+    cands = run["candidates"]
+    n = len(cands)
+    st.subheader("Run at %s: %s" % (fmt_dt(run["created_at"]),
+                                    "one schedule" if n == 1 else "%d equivalent schedules" % n))
     newest = max((p["saved_at"] for p in participants if p["saved_at"]), default=None)
     if newest and newest > run["created_at"]:
         st.warning("Preferences were saved after this run. Run the market again before choosing.")
     if run["excluded_names"]:
         st.caption("Excluded from this run: " + ", ".join(run["excluded_names"]))
-    cands = run["candidates"]
-    if len(cands) == 1:
-        st.caption("Every seed gave the same schedule.")
+    if n == 1:
+        st.caption("The market found no other schedule with the same total of preference points (within %.2f), "
+                   "so its choice is the only outcome." % sa.EQUIVALENT_POINTS)
     else:
-        st.caption("The seeds gave %d different schedules. Outcomes marked equivalent satisfy the same total "
-                   "preference points (within %.2f); only who gets what differs, so the choice is yours."
-                   % (len(cands), sa.EQUIVALENT_POINTS))
+        rule = (sa.tie_rule_from_report(cands[0].get("report"))
+                or "ties broken in favour of the person who was otherwise worst off")
+        st.caption("The market found %d schedules that satisfy the same total of preference points (within %.2f): "
+                   "only who gets which equivalent bundle differs, typically who takes the heavier package. "
+                   "Its own choice is listed first, picked by %s. The choice between them is yours."
+                   % (n, sa.EQUIVALENT_POINTS, rule))
     columns = st.columns(len(cands)) if len(cands) <= 3 else [st.container(border=True) for _ in cands]
     for k, cand in enumerate(cands):
         chosen = run["chosen_index"] == k
@@ -456,7 +459,12 @@ def show_candidates(Session, cycle, run, participants, locked):
                 st.warning("%d constraint violation(s): see the Violations column." % cand["violations"])
             show_grid(cand["schedule"], cand["structure"])
             st.dataframe(person_table(cand["person_rows"]), hide_index=True)
-            st.caption(cand["status"])
+            # the status line carries the solver's warnings (too few ranks, a rule violation,
+            # indicative prices) after " WARNING: "; each is shown as its own warning box
+            status, *notes = cand["status"].split(" WARNING: ")
+            st.caption(status)
+            for note in notes:
+                st.warning(note)
             if st.button("Chosen" if chosen else "Choose this outcome", key="choose_%d_%d" % (run["id"], k),
                          type="secondary" if chosen else "primary", disabled=chosen or locked):
                 with Session() as s:
