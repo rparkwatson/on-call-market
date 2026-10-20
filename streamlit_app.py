@@ -24,6 +24,7 @@ import streamlit as st
 
 import oncall_market as om
 from app import db, prefs, repo
+from app import sheet_component
 from app import solver_adapter as sa
 from app.repo import RepoError
 
@@ -646,28 +647,55 @@ def participant_view(Session, token):
     with Session() as s:
         saved = repo.get_submission(s, participant["id"])
     slots = sa.slot_table(cycle)
+    plain = wants_plain_form()
     if state == "collecting":
-        participant_form(Session, participant, cycle, slots, saved)
+        if plain:
+            participant_form_plain(Session, participant, cycle, slots, saved)
+        else:
+            participant_form(Session, participant, cycle, slots, saved)
     else:
         st.info("Collection has closed. The schedule will appear here once the organiser publishes it.")
         if saved:
             st.caption("Your saved entries (%s):" % fmt_dt(saved["saved_at"]))
-            show_saved(slots, saved["cells"])
+            show_saved(slots, saved["cells"], participant, cycle, plain)
         else:
             st.warning("You did not save any preferences, so you are not part of this cycle.")
 
 
-def show_saved(slots, cells):
-    rows = [{"Day": s["short"], "Shift": "%s (%s)" % (s["label"], s["code"]), "Entry": cells.get(s["id"], "")} for s in slots]
-    st.table(rows)
-    preview = prefs.point_values(cells)
+def wants_plain_form():
+    """?plain=1 asks for the plain form (one text box per slot) instead of the sheet."""
+    return str(st.query_params.get("plain", "")).strip().lower() in ("1", "true", "yes")
+
+
+def participant_link(participant, plain=False):
+    """The participant's own link, relative to this page: ?p=<token>[&plain=1]."""
+    return "?p=%s%s" % (participant["token"], "&plain=1" if plain else "")
+
+
+def show_saved(slots, cells, participant, cycle, plain=False):
+    """The saved column read-only: the sheet with the saved colours (a plain table with
+    ?plain=1), then what each rank is worth."""
+    if plain:
+        rows = [{"Day": s["short"], "Shift": "%s (%s)" % (s["label"], s["code"]), "Entry": cells.get(s["id"], "")}
+                for s in slots]
+        st.table(rows)
+    else:
+        sheet_component.render_sheet(slots, cells, participant["name"], cycle["min_ranks"], cycle["mode"],
+                                     readonly=True, key="sheet_readonly")
+    show_point_preview(cells, participant, cycle)
+
+
+def show_point_preview(cells, participant, cycle):
+    if not cells:
+        return
+    preview = prefs.point_values(cells, cycle["mode"], participant["budget"])
     if preview:
-        st.caption("Worth of each rank (your 100 points spread over the slots you ranked):")
+        st.caption("Worth of each saved rank (your %g points spread over the slots you ranked):" % participant["budget"])
         st.table([{"Rank": r, "Points per slot": round(p, 1), "Slots": n} for r, p, n in preview])
 
 
-def participant_form(Session, participant, cycle, slots, saved):
-    cells = saved["cells"] if saved else {}
+def participant_intro(saved, cycle, sheet):
+    """The status line and the instructions shared by the sheet and the plain form."""
     flash()
     if saved:
         st.success("Saved %s. You can change your entries until collection closes." % fmt_dt(saved["saved_at"]))
@@ -676,7 +704,54 @@ def participant_form(Session, participant, cycle, slots, saved):
     st.markdown(
         "Write **1** next to the slot you want most, **2** next to the next, and so on. Rank at least **%d** slots; "
         "ties and gaps between numbers are fine, only the order matters. Write **X** where you cannot work. "
-        "Leave a slot blank if you are available but have no preference." % cycle["min_ranks"])
+        "Leave a slot blank if you are available but have no preference.%s"
+        % (cycle["min_ranks"], " Tab or Enter moves down the column." if sheet else ""))
+
+
+def save_cells(Session, participant, cycle, slots, raw):
+    """Validate the typed column ({slot_id: text}) and save it, with the same messages
+    whichever form it came from.  Reruns the page after a successful save."""
+    clean, errors = prefs.validate_cells(raw, cycle["min_ranks"], cycle["mode"])
+    if errors:
+        by_id = {s["id"]: s for s in slots}
+        for slot_id, message in errors:
+            prefix = ("%s %s: " % (by_id[slot_id]["short"], by_id[slot_id]["label"])) if slot_id else ""
+            st.error(prefix + message)
+        st.info("Nothing was saved; fix the entries above and save again.")
+        return
+    try:
+        with Session() as s:
+            repo.upsert_submission(s, participant["id"], clean)
+    except RepoError as e:
+        st.error(str(e))
+    else:
+        st.session_state["flash"] = "Saved. Thank you!"
+        st.rerun()
+
+
+def participant_form(Session, participant, cycle, slots, saved):
+    """The sheet (app/components/sheet) with the Save button under it.  The button stays
+    disabled until the sheet has reported its cells, so a click always saves what is shown."""
+    cells = saved["cells"] if saved else {}
+    participant_intro(saved, cycle, sheet=True)
+    value = sheet_component.render_sheet(slots, cells, participant["name"], cycle["min_ranks"], cycle["mode"],
+                                         key="sheet")
+    ready = value is not None
+    if not ready:
+        st.caption("Loading the sheet ... If it does not appear, use the [plain form](%s)."
+                   % participant_link(participant, plain=True))
+    if st.button("Save my preferences", type="primary", disabled=not ready, key="save_sheet"):
+        raw = {slot["id"]: value.get(slot["id"], "") for slot in slots}
+        save_cells(Session, participant, cycle, slots, raw)
+    show_point_preview(cells, participant, cycle)
+    if ready:
+        st.caption("Trouble with the sheet? Use the [plain form](%s)." % participant_link(participant, plain=True))
+
+
+def participant_form_plain(Session, participant, cycle, slots, saved):
+    """The fallback form: one text box per slot (?plain=1).  Same validation and saving."""
+    cells = saved["cells"] if saved else {}
+    participant_intro(saved, cycle, sheet=False)
     with st.form("prefs", border=False):
         for slot in slots:
             if slot["first_of_day"]:
@@ -686,27 +761,9 @@ def participant_form(Session, participant, cycle, slots, saved):
         submitted = st.form_submit_button("Save my preferences", type="primary")
     if submitted:
         raw = {slot["id"]: st.session_state.get("cell_" + slot["id"], "") for slot in slots}
-        clean, errors = prefs.validate_cells(raw, cycle["min_ranks"], cycle["mode"])
-        if errors:
-            by_id = {s["id"]: s for s in slots}
-            for slot_id, message in errors:
-                prefix = ("%s %s: " % (by_id[slot_id]["short"], by_id[slot_id]["label"])) if slot_id else ""
-                st.error(prefix + message)
-            st.info("Nothing was saved; fix the entries above and save again.")
-        else:
-            try:
-                with Session() as s:
-                    repo.upsert_submission(s, participant["id"], clean)
-            except RepoError as e:
-                st.error(str(e))
-            else:
-                st.session_state["flash"] = "Saved. Thank you!"
-                st.rerun()
-    if cells:
-        preview = prefs.point_values(cells, cycle["mode"], participant["budget"])
-        if preview:
-            st.caption("Worth of each saved rank (your %g points spread over the slots you ranked):" % participant["budget"])
-            st.table([{"Rank": r, "Points per slot": round(p, 1), "Slots": n} for r, p, n in preview])
+        save_cells(Session, participant, cycle, slots, raw)
+    show_point_preview(cells, participant, cycle)
+    st.caption("Prefer the sheet? [Open it](%s)." % participant_link(participant))
 
 
 # ---------------------------------------------------------------------------

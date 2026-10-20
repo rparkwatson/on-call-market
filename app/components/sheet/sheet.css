@@ -1,0 +1,61 @@
+/* The look of the original sheet (the <style> block in oncall_gui.py's PAGE), reduced to the
+   rules the one-column sheet needs.  Borders sit on the cells (border-collapse: separate) so
+   that the sticky input column on narrow screens keeps its lines. */
+:root {
+  --ink: #1d2733; --muted: #5c6670; --line: #d6d9dc; --paper: #ffffff; --wash: #f3f4f2;
+  --accent: #0f6e56; --x: #e9eaea; --mark: #e1f5ee; --mark-line: #9fe1cb;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; padding: 0; background: transparent; }
+body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--ink); }
+#root { padding: 2px 0 4px; }
+
+.toolbar { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 0 0 10px; font-size: 14px; }
+.toolbar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.toolbar input[type=checkbox] { margin: 0; accent-color: var(--accent); width: 15px; height: 15px; }
+.count { color: var(--muted); }
+.count.short { color: #9b1c1c; }
+
+.table-wrap { display: inline-block; max-width: 100%; overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; }
+table { border-collapse: separate; border-spacing: 0; width: auto; font-size: 14px; }
+th, td { padding: 5px 6px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; vertical-align: middle; }
+th { background: var(--wash); font-weight: 600; }
+th.person { white-space: normal; min-width: 96px; max-width: 160px; vertical-align: top; }
+th.person, td.cell { padding-right: 12px; }
+th:nth-child(1), td:nth-child(1) { min-width: 120px; }
+th:nth-child(2), td:nth-child(2) { min-width: 130px; }
+th:nth-child(3), td:nth-child(3) { min-width: 140px; }
+th .clear { display: block; font: inherit; font-size: 12px; font-weight: 400; color: var(--muted); background: none; border: none; padding: 0; cursor: pointer; }
+th .clear:hover { color: var(--ink); }
+th .clear:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+td.dim { color: var(--muted); }
+td.time { font-size: 12.5px; }
+tr.gap td { background: var(--wash); color: var(--muted); font-size: 13px; padding: 3px 8px; }
+tr.dayend td { border-bottom: 2px solid var(--line); }
+tbody tr:last-child td { border-bottom: none; }
+
+td.cell input, td.cell .val {
+  display: inline-block; width: 48px; text-align: center; padding: 4px 2px; font: inherit; line-height: 1.4;
+  color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 6px;
+}
+td.cell input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+td.cell input:disabled { opacity: .6; }
+td.cell .rank { background: var(--mark); border-color: var(--mark-line); }
+td.cell .x { background: var(--x); color: var(--muted); }
+td.cell .val { min-height: 2em; }
+
+/* Phones: tighter cells and no minimum column widths (the three-shift sheet then fits a
+   390 px screen); should a structure's labels make the table wider than the screen, it
+   scrolls sideways and the input column stays in view while the other columns slide under it. */
+@media (max-width: 560px) {
+  .table-wrap { display: block; }
+  table { font-size: 13px; }
+  th, td { padding: 4px 5px; }
+  th:nth-child(1), td:nth-child(1), th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3) { min-width: 0; }
+  th.person { min-width: 0; max-width: 110px; }
+  td.time { font-size: 11.5px; }
+  th.person, td.cell { position: sticky; right: 0; z-index: 1; background: var(--paper); box-shadow: -6px 0 6px -6px rgba(0, 0, 0, .18); }
+  th.person { background: var(--wash); }
+  tr.gap td { white-space: normal; }
+}

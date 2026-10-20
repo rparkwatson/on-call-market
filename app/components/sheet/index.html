@@ -1,0 +1,22 @@
+<!doctype html>
+<!-- The participant's preference sheet: one column of the sheet in oncall_gui.py, shown inside
+     the hosted app as a Streamlit custom component.  No build step: sheet.js talks the
+     component protocol by hand and sheet.css copies the original look. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Preference sheet</title>
+<link rel="stylesheet" href="sheet.css">
+</head>
+<body>
+<div id="root">
+  <div class="toolbar" id="toolbar">
+    <label><input type="checkbox" id="clickrank"> Click to rank (each click on an empty cell fills in the next number)</label>
+    <span id="count" class="count"></span>
+  </div>
+  <div class="table-wrap"><table id="sheet" aria-label="Your preferences"></table></div>
+</div>
+<script src="sheet.js"></script>
+</body>
+</html>
