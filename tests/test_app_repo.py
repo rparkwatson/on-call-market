@@ -5,7 +5,7 @@ from datetime import date
 
 import pytest
 
-from app_helpers import make_example_cycle, temp_database
+from tests.app_helpers import make_example_cycle, temp_database
 from app import repo
 from app.repo import RepoError
 

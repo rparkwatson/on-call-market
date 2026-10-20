@@ -5,7 +5,7 @@ from datetime import date
 
 import pytest
 
-from app_helpers import ROOT  # noqa: F401  (puts the repo root on sys.path)
+from tests.app_helpers import ROOT  # noqa: F401  (puts the repo root on sys.path)
 import oncall_market as om
 from app import prefs
 

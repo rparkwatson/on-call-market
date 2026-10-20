@@ -8,7 +8,7 @@ import os
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from app_helpers import ROOT, make_example_cycle, temp_database
+from tests.app_helpers import ROOT, make_example_cycle, temp_database
 from app import repo
 
 APP = str(ROOT / "streamlit_app.py")

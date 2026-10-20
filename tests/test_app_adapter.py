@@ -10,7 +10,7 @@ from datetime import date
 
 import pytest
 
-from app_helpers import EXAMPLE_CSV, example_columns, make_example_cycle, temp_database
+from tests.app_helpers import EXAMPLE_CSV, example_columns, make_example_cycle, temp_database
 import oncall_market as om
 from app import repo
 from app import solver_adapter as sa
