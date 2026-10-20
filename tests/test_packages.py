@@ -296,3 +296,20 @@ def test_cli_as_a_script_with_start_skip_and_max_per_day(tmp_path):
     bad = subprocess.run([sys.executable, "packages.py", "--structure", "single", "--people", "4", "--days", "9"],
                          capture_output=True, text=True, cwd=ROOT)
     assert bad.returncode == 1 and "use at least 5 people or max_per_day 2" in bad.stderr
+
+
+# ---------------------------------------------------------------------------
+# the shipped example file and the documentation
+# ---------------------------------------------------------------------------
+
+def test_packages_example_json_is_the_builtin_three_shift_set():
+    with open(os.path.join(ROOT, "packages_example.json"), encoding="utf-8") as f:
+        example = json.load(f)
+    assert example == om.STRUCTURES["three"]["packages"] == pk.derive_packages("three", 7, 9)
+
+
+def test_docs_tables_are_what_describe_prints():
+    with open(os.path.join(ROOT, "docs", "packages.md"), encoding="utf-8") as f:
+        text = f.read()
+    for n, days in ((6, 9), (7, 10), (8, 9)):
+        assert pk.describe(pk.derive_packages("three", n, days), "three") in text, (n, days)

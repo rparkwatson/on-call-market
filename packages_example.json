@@ -1,0 +1,5 @@
+{
+  "heavy":          {"count": 3, "cats": {"four": [3, 3], "eve": [1, 1]}, "total": [4, 4]},
+  "light_evenings": {"count": 3, "cats": {"four": [2, 2], "eve": [2, 2]}, "total": [4, 4]},
+  "light_days":     {"count": 1, "cats": {"four": [3, 3], "eve": [0, 0]}, "total": [3, 3]}
+}
