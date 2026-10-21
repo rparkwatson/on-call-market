@@ -287,3 +287,22 @@ work in isolated worktrees and every change is reviewable?
 
 Still open: which shift structure the group actually uses; the GitHub repository name and the
 go-ahead to push (pushing publishes the code).
+
+## 8. Status on 2026-10-20
+
+All six delegated tasks are merged on `main` and pushed to
+https://github.com/rparkwatson/on-call-market (public). The combined suite is 299 tests.
+
+| Task | Outcome |
+|---|---|
+| T1 | `solve_sheet` entry point behind the CLI and the local GUI; byte-identical outputs; pytest suite. |
+| T2 | `packages.py` derives packages for any headcount and period from the four principles; 7 x 9 reproduces the built-ins; `docs/packages.md`. |
+| T3 | Seed-stable tie handling with an explainable tie-break; non-responder flags and minimum-rank warnings; damped carry-over; five-block search started from the market's demand (regret 5.7 to about 0.6, prices still labelled indicative); six defects fixed. |
+| T4 | Streamlit app: personal links, organiser dashboard, exclusion of non-responders, manual swaps with a log, publishing, CSV export, deploy and user guides. |
+| T5 | The app lists the solver's equivalent schedules (the market's choice first) instead of trying several seeds; compatibility seams removed. |
+| T6 | The participant page is the original one-column sheet (custom component), with the plain form at `?plain=1` and a read-only sheet after the deadline. |
+
+Deployment: the Streamlit Community Cloud app builds and starts; the first connection to the
+Neon database failed and the page now shows the driver's reason (password masked) so it can
+be fixed from the secret. Remaining before the November cycle: fix that connection, then run
+one real end-to-end check (create cycle, submit through a personal link, run, publish).
