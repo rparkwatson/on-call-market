@@ -58,7 +58,9 @@ the system" in README.md) and save it.
 
 Click **Run the market**. One solve takes about 10 to 20 seconds on a laptop and up to a
 minute or two on the free host; stay on the page. Several schedules often satisfy the same
-total of preference points; the run lists every one it found, marked **equivalent**. The
+total of preference points; the run keeps up to 24 of them, marked **equivalent**. The tab
+lists the first six (and the chosen one); tick **Show all** below the list to see the rest,
+and the caption above the list says when the solver found more than the 24 kept. The
 only difference between them is who gets which equivalent bundle (typically who takes the
 heavier package). The market's own choice comes first, picked by a fixed rule: the highest
 minimum % of ideal, then the smallest spread of net price, then the fewest late shifts for
