@@ -412,12 +412,12 @@ def run_tab(Session, cycle, run):
         params = {"structure": cycle["structure"], "start_date": cycle["start_date"].isoformat(),
                   "n_days": cycle["n_days"], "skip_dates": cycle["skip_dates"], "max_per_day": cycle["max_per_day"],
                   "mode": cycle["mode"], "min_ranks": cycle["min_ranks"], "people": outcome["responders"],
-                  "budgets": outcome["budgets"]}
+                  "budgets": outcome["budgets"], "n_alternatives_found": outcome["n_alternatives_found"]}
         with Session() as s:
             repo.create_run(s, cycle["id"], seeds=outcome["candidates"][0]["seeds"], params=params,
                             candidates=outcome["candidates"], excluded_names=outcome["excluded"],
                             packages_used={"source": packages["source"], "packages": packages["packages"]})
-        n = len(outcome["candidates"])
+        n = outcome["n_alternatives_found"]
         st.session_state["flash"] = ("Run finished: one schedule, no equivalent alternative. Choose it below."
                                      if n == 1 else "Run finished: %d equivalent schedules. Choose one below." % n)
         st.rerun()

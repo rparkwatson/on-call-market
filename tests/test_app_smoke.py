@@ -136,4 +136,4 @@ def test_run_market_lists_the_equivalent_schedules(Session):
     assert sum(w.value == "Person D ranked 5 slots; the minimum is 6." for w in at.warning) == 3
     with Session() as s:
         run = repo.get_latest_run(s, cycle["id"])
-    assert run["seeds"] == [1] and len(run["candidates"]) == 3
+    assert run["seeds"] == [1] and len(run["candidates"]) == 3 == run["params"]["n_alternatives_found"]
