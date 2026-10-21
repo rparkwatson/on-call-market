@@ -302,7 +302,10 @@ https://github.com/rparkwatson/on-call-market (public). The combined suite is 29
 | T5 | The app lists the solver's equivalent schedules (the market's choice first) instead of trying several seeds; compatibility seams removed. |
 | T6 | The participant page is the original one-column sheet (custom component), with the plain form at `?plain=1` and a read-only sheet after the deadline. |
 
-Deployment: the Streamlit Community Cloud app builds and starts; the first connection to the
-Neon database failed and the page now shows the driver's reason (password masked) so it can
-be fixed from the secret. Remaining before the November cycle: fix that connection, then run
-one real end-to-end check (create cycle, submit through a personal link, run, publish).
+Deployment: the Streamlit Community Cloud app runs against the Neon database. On 2026-10-21
+a full end-to-end check passed on the live app: cycle created, four columns submitted
+through personal links on the sheet, collection closed, packages derived for the four
+responders, market run, outcome chosen, schedule published, public and participant views
+correct, test cycle deleted. One operational finding: after a push that changes files under
+`app/`, the hosted process kept a stale module until the app was rebooted from the
+Streamlit dashboard (now in `docs/deploy.md`). The app is ready for the November cycle.
