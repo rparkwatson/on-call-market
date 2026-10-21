@@ -131,7 +131,11 @@ re-solved with `python oncall_market.py solve preferences.csv`.
 ## 8. Updating the app
 
 Push to `main`; Community Cloud redeploys automatically within a minute or two. Run the
-tests before pushing. If the database schema ever changes (new columns), the app does not
+tests before pushing. After a push that changes files under `app/`, `packages.py` or
+`oncall_market.py`, open the app's menu (lower right, **Manage app**) and choose **Reboot
+app**: the hot reload sometimes updates `streamlit_app.py` but keeps the old copies of those
+modules in memory, which shows up as an `AttributeError` on the page until the process is
+restarted. If the database schema ever changes (new columns), the app does not
 migrate existing tables: either add the column in the Neon SQL editor or create a fresh
 database and point `DATABASE_URL` at it after downloading the CSVs.
 
