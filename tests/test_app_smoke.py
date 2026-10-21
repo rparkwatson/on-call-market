@@ -9,7 +9,9 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from tests.app_helpers import ROOT, make_example_cycle, temp_database
+import oncall_market as om
 from app import repo
+from app import solver_adapter as sa
 
 APP = str(ROOT / "streamlit_app.py")
 
@@ -136,4 +138,83 @@ def test_run_market_lists_the_equivalent_schedules(Session):
     assert sum(w.value == "Person D ranked 5 slots; the minimum is 6." for w in at.warning) == 3
     with Session() as s:
         run = repo.get_latest_run(s, cycle["id"])
-    assert run["seeds"] == [1] and len(run["candidates"]) == 3
+    assert run["seeds"] == [1] and len(run["candidates"]) == 3 == run["params"]["n_alternatives_found"]
+
+
+def _fabricated_run(Session, cycle, n_candidates, n_found):
+    """A stored run of n_candidates copies of one hand-built outcome (no solve: the responders
+    in a round-robin over the slots, valued at zero prices), recorded as n_found equivalent
+    schedules found.  Realistic enough for the Run market and Review tabs to render it."""
+    with Session() as s:
+        participants = repo.list_participants(s, cycle["id"])
+        submissions = repo.submissions_by_name(s, cycle["id"])
+    packages = om.STRUCTURES[cycle["structure"]]["packages"]
+    ctx = sa.build_context(cycle, participants, submissions, packages)
+    roles = [name for name, pk in packages.items() for _ in range(int(pk["count"]))][:len(ctx.people)]
+    owner = [j % len(ctx.people) for j in range(len(ctx.slots))]
+    result = {"roles": roles, "owner": owner, "prices": [0.0] * len(ctx.slots),
+              "pkg_prices": {name: 0.0 for name in packages},
+              "cleared": False, "rounds": 0, "max_regret": 0.0, "market_roles": True}
+    base = sa.candidate_from_solution(om.solution_dict(ctx.problem, ctx.values, ctx.avail, result), 1)
+    base.update(total_points=50.0, equivalent_to_best=True)
+    candidates = [dict(base, label="Outcome 1 (the market's choice)" if k == 0
+                       else "Outcome %d (equivalent alternative)" % (k + 1)) for k in range(n_candidates)]
+    with Session() as s:
+        return repo.create_run(s, cycle["id"], seeds=[1], params={"n_alternatives_found": n_found},
+                               candidates=candidates, excluded_names=[],
+                               packages_used={"source": "built-in", "packages": packages})
+
+
+def _choose_buttons(at):
+    return [b for b in at.button if b.label == "Choose this outcome"]
+
+
+def test_run_market_tab_lists_six_outcomes_until_show_all(Session):
+    """A run that kept 24 of the 40 equivalent schedules the solver found (the live case):
+    the tab lists six with the capped caption and a 'Show all' box; ticking it lists all 24;
+    a chosen outcome beyond the six stays listed when the box is cleared again."""
+    cycle = make_example_cycle(Session, name="Smoke cap", close=True)
+    run = _fabricated_run(Session, cycle, n_candidates=24, n_found=40)
+    at = _app(a=cycle["admin_token"]).run()
+    assert not at.exception
+    assert any(h.value.endswith(": 40 equivalent schedules") for h in at.subheader)
+    assert any(c.value.startswith("The market found 40 schedules that satisfy") for c in at.caption)
+    assert any(c.value == "The market found 40 equivalent schedules; 24 are kept. The first 6 are listed; the 18 "
+               "others are equally good. Tick 'Show all 24 outcomes' below the list to see them." for c in at.caption)
+    assert len(_choose_buttons(at)) == 6
+    assert sum("Outcome 6 (equivalent alternative)" in m.value for m in at.markdown) == 1
+    assert not any("Outcome 7 (equivalent alternative)" in m.value for m in at.markdown)
+    box = next(c for c in at.checkbox if c.label == "Show all 24 outcomes")
+    assert box.value is False
+    box.check().run()
+    assert not at.exception
+    assert len(_choose_buttons(at)) == 24
+    assert any(c.value == "The market found 40 equivalent schedules; 24 are kept. All of them are listed."
+               for c in at.caption)
+    # choose the eighth outcome, then clear the box: the chosen one is listed with the first six
+    _choose_buttons(at)[7].click().run()
+    assert not at.exception
+    assert any("Outcome 8 (equivalent alternative) chosen" in s.value for s in at.success)
+    next(c for c in at.checkbox if c.label == "Show all 24 outcomes").uncheck().run()
+    assert not at.exception
+    assert len(_choose_buttons(at)) == 6 and sum(b.label == "Chosen" for b in at.button) == 1
+    assert sum("Outcome 8 (equivalent alternative)" in m.value and "CHOSEN" in m.value for m in at.markdown) == 1
+    assert any(c.value == "The market found 40 equivalent schedules; 24 are kept. The first 6 and the chosen one "
+               "are listed; the 17 others are equally good. Tick 'Show all 24 outcomes' below the list to see them."
+               for c in at.caption)
+    with Session() as s:
+        assert repo.get_run(s, run["id"])["chosen_index"] == 7
+
+
+def test_run_market_tab_caption_when_only_the_listing_is_capped(Session):
+    """Eight equivalent schedules, all kept: six are listed and the caption says so without
+    mentioning the solver's cap."""
+    cycle = make_example_cycle(Session, name="Smoke eight", close=True)
+    _fabricated_run(Session, cycle, n_candidates=8, n_found=8)
+    at = _app(a=cycle["admin_token"]).run()
+    assert not at.exception
+    assert any(h.value.endswith(": 8 equivalent schedules") for h in at.subheader)
+    assert any(c.value == "The first 6 are listed; the 2 others are equally good. Tick 'Show all 8 outcomes' "
+               "below the list to see them." for c in at.caption)
+    assert not any("are kept" in c.value for c in at.caption)
+    assert len(_choose_buttons(at)) == 6 and any(c.label == "Show all 8 outcomes" for c in at.checkbox)

@@ -3,6 +3,7 @@ example data (one solve, one candidate per welfare-equivalent schedule) and chec
 against the CLI path, the solver's warnings, the exclusion rule, edits and the CSV texts."""
 
 import copy
+import itertools
 import random
 import sys
 import types
@@ -218,6 +219,37 @@ def test_run_market_without_alternatives_has_one_candidate(example_run, monkeypa
         cand = outcome["candidates"][0]
         assert cand["label"] == "Outcome 1 (the market's choice)" and cand["equivalent_to_best"]
         assert cand["seeds"] == [1] and cand["owner"] == example_run["outcome"]["candidates"][0]["owner"]
+
+
+def test_run_market_keeps_at_most_24_of_many_alternatives(example_run, monkeypatch):
+    """A solve that reports 40 equivalent schedules (the solver's own limit, seen live with
+    sparse preferences) is stored as the market's choice plus the first 23 alternatives in the
+    solver's order, and the outcome records that 40 were found.  The example's own run, with
+    three, is not capped."""
+    cycle, participants, submissions, packages = (example_run[k] for k in ("cycle", "participants", "submissions", "packages"))
+    solution = example_run["solution"]
+    chosen = next(a for a in solution["alternatives"] if a["chosen"])
+    people = solution["people"]
+    fakes = []  # 39 relabellings of the market's choice: who holds which bundle is permuted
+    for permuted in itertools.islice(itertools.permutations(people), 1, 40):  # 0 is the identity
+        swap = dict(zip(people, permuted))
+        fakes.append({"owner": [swap[p] for p in chosen["owner"]],
+                      "roles": {swap[p]: pk for p, pk in chosen["roles"].items()},
+                      "total_points": chosen["total_points"], "hours": {swap[p]: h for p, h in chosen["hours"].items()},
+                      "late_shifts": {swap[p]: v for p, v in chosen["late_shifts"].items()}, "chosen": False})
+    alternatives = fakes[:5] + [chosen] + fakes[5:]  # the choice sits sixth in the solver's list
+    assert len(alternatives) == 40 and len({tuple(a["owner"]) for a in alternatives}) == 40
+    monkeypatch.setattr(sa, "solve_sheet", lambda text, **kwargs: dict(solution, alternatives=alternatives))
+    outcome = sa.run_market(cycle, participants, submissions, packages)
+    cands = outcome["candidates"]
+    assert sa.MAX_ALTERNATIVES == 24 and len(cands) == 24 and outcome["n_alternatives_found"] == 40
+    assert cands[0]["label"] == "Outcome 1 (the market's choice)"
+    assert cands[0]["owner"] == example_run["outcome"]["candidates"][0]["owner"]
+    assert [c["label"] for c in cands[1:]] == ["Outcome %d (equivalent alternative)" % k for k in range(2, 25)]
+    for c, alt in zip(cands[1:], fakes[:23]):  # the first 23 alternatives, the choice skipped
+        assert [c["people"][i] for i in c["owner"]] == alt["owner"] and c["roles"] == alt["roles"]
+        assert c["prices"] == cands[0]["prices"] and c["seeds"] == [1]
+    assert example_run["outcome"]["n_alternatives_found"] == 3 == len(example_run["outcome"]["candidates"])
 
 
 def test_status_line_wording():

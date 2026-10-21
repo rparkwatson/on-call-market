@@ -28,6 +28,7 @@ from oncall_market import prepare_sheet, solve_sheet, solution_dict, schedule_cs
 
 DEFAULT_SEEDS = (1,)       # run_market solves once; the tuple stays for callers that still pass seeds
 EQUIVALENT_POINTS = 0.05   # outcomes whose total points are within this are shown as equivalent
+MAX_ALTERNATIVES = 24      # candidates kept per run: the market's choice plus the first 23 alternatives
 REGRET_OK = 0.1            # README: below this the prices are as good as exact clearing prices
 
 STRUCTURE_LABELS = {
@@ -318,8 +319,12 @@ def run_market(cycle, participants, submissions, packages, seeds=DEFAULT_SEEDS, 
     clearing prices do not depend on the seed, and one solve reports every equivalent
     schedule it found in solution["alternatives"], so re-solving with other seeds adds nothing.
     Returns {"candidates": [the market's choice first, then the equivalent alternatives in the
-             solver's order], "responders": [names], "excluded": [names], "packages": packages,
-             "budgets": {...}, "text": preferences CSV text}.
+             solver's order], "n_alternatives_found": int, "responders": [names],
+             "excluded": [names], "packages": packages, "budgets": {...}, "text": preferences CSV text}.
+    At most MAX_ALTERNATIVES candidates are kept (the market's choice plus the first
+    MAX_ALTERNATIVES - 1 alternatives in the solver's order); "n_alternatives_found" is how many
+    equivalent schedules the solve reported, the market's choice included, so that the
+    dashboard can say when some were dropped.
     Every candidate is valued at the same prices (the market's); its "warnings" and
     "prices_supported" come from the solver and are repeated in its status line.
     Raises om.SchedulingError for anything the organiser has to fix."""
@@ -339,11 +344,11 @@ def run_market(cycle, participants, submissions, packages, seeds=DEFAULT_SEEDS, 
         log("Solving (seed %d) ..." % seed)
     solution = solve_sheet(text, log=log, **_with_min_ranks(solve_sheet, kwargs, min_ranks))
     chosen = ([r["person"] for r in solution["schedule"]], {r["person"]: r["package"] for r in solution["summary"]})
-    solutions = [solution]
-    for alt in solution.get("alternatives") or []:
-        if alt.get("chosen") or (list(alt["owner"]), dict(alt["roles"])) == chosen:
-            continue
-        solutions.append(solution_dict(problem, values, avail, alternative_result(solution, alt)))
+    alternatives = [alt for alt in solution.get("alternatives") or []
+                    if not (alt.get("chosen") or (list(alt["owner"]), dict(alt["roles"])) == chosen)]
+    n_found = 1 + len(alternatives)
+    solutions = [solution] + [solution_dict(problem, values, avail, alternative_result(solution, alt))
+                              for alt in alternatives[:MAX_ALTERNATIVES - 1]]
     candidates = []
     for k, sol in enumerate(solutions):
         cand = candidate_from_solution(sol, seed)
@@ -353,8 +358,8 @@ def run_market(cycle, participants, submissions, packages, seeds=DEFAULT_SEEDS, 
     best = max(c["total_points"] for c in candidates)
     for cand in candidates:
         cand["equivalent_to_best"] = (best - cand["total_points"]) <= EQUIVALENT_POINTS
-    return {"candidates": candidates, "responders": people, "excluded": excluded, "packages": packages,
-            "budgets": budgets or {}, "text": text}
+    return {"candidates": candidates, "n_alternatives_found": n_found, "responders": people, "excluded": excluded,
+            "packages": packages, "budgets": budgets or {}, "text": text}
 
 
 # ---------------------------------------------------------------------------

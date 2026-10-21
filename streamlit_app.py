@@ -41,6 +41,7 @@ STATE_LABELS = {
 PERSON_COLUMNS = [("person", "Person"), ("package", "Package"), ("hours", "Hours"), ("shifts", "Shifts"),
                   ("late_shifts", "Late shifts"), ("points", "Points"), ("pct_of_ideal", "% of ideal"),
                   ("net_price", "Net price"), ("violations", "Violations")]
+SHOWN_OUTCOMES = 6   # outcomes the Run market tab lists until "Show all N outcomes" is ticked
 
 
 # ---------------------------------------------------------------------------
@@ -412,12 +413,12 @@ def run_tab(Session, cycle, run):
         params = {"structure": cycle["structure"], "start_date": cycle["start_date"].isoformat(),
                   "n_days": cycle["n_days"], "skip_dates": cycle["skip_dates"], "max_per_day": cycle["max_per_day"],
                   "mode": cycle["mode"], "min_ranks": cycle["min_ranks"], "people": outcome["responders"],
-                  "budgets": outcome["budgets"]}
+                  "budgets": outcome["budgets"], "n_alternatives_found": outcome["n_alternatives_found"]}
         with Session() as s:
             repo.create_run(s, cycle["id"], seeds=outcome["candidates"][0]["seeds"], params=params,
                             candidates=outcome["candidates"], excluded_names=outcome["excluded"],
                             packages_used={"source": packages["source"], "packages": packages["packages"]})
-        n = len(outcome["candidates"])
+        n = outcome["n_alternatives_found"]
         st.session_state["flash"] = ("Run finished: one schedule, no equivalent alternative. Choose it below."
                                      if n == 1 else "Run finished: %d equivalent schedules. Choose one below." % n)
         st.rerun()
@@ -425,17 +426,48 @@ def run_tab(Session, cycle, run):
         show_candidates(Session, cycle, run, participants, locked=False)
 
 
+def listed_outcomes(n, chosen_index, show_all):
+    """Indexes of the run's candidates the Run market tab lists: all n when there are at most
+    SHOWN_OUTCOMES or the organiser ticked "Show all", else the first SHOWN_OUTCOMES plus the
+    chosen one when it lies beyond them."""
+    if show_all or n <= SHOWN_OUTCOMES:
+        return list(range(n))
+    listed = list(range(SHOWN_OUTCOMES))
+    if chosen_index is not None and chosen_index >= SHOWN_OUTCOMES:
+        listed.append(chosen_index)
+    return listed
+
+
+def listing_note(n, n_found, listed):
+    """The caption above the outcomes when some are not listed or the run kept fewer equivalent
+    schedules than the solver found (n of n_found); None when every schedule found is listed."""
+    parts = []
+    if n_found > n:
+        parts.append("The market found %d equivalent schedules; %d are kept." % (n_found, n))
+    hidden = n - len(listed)
+    if hidden:
+        which = "The first %d" % SHOWN_OUTCOMES + (" and the chosen one" if len(listed) > SHOWN_OUTCOMES else "")
+        others = "the other one is" if hidden == 1 else "the %d others are" % hidden
+        parts.append("%s are listed; %s equally good. Tick 'Show all %d outcomes' below the list to see %s."
+                     % (which, others, n, "it" if hidden == 1 else "them"))
+    elif parts:
+        parts.append("All of them are listed.")
+    return " ".join(parts) or None
+
+
 def show_candidates(Session, cycle, run, participants, locked):
     cands = run["candidates"]
     n = len(cands)
+    # runs stored before the adapter's cap carry no count: every schedule found was kept
+    n_found = max(n, int((run.get("params") or {}).get("n_alternatives_found") or 0))
     st.subheader("Run at %s: %s" % (fmt_dt(run["created_at"]),
-                                    "one schedule" if n == 1 else "%d equivalent schedules" % n))
+                                    "one schedule" if n_found == 1 else "%d equivalent schedules" % n_found))
     newest = max((p["saved_at"] for p in participants if p["saved_at"]), default=None)
     if newest and newest > run["created_at"]:
         st.warning("Preferences were saved after this run. Run the market again before choosing.")
     if run["excluded_names"]:
         st.caption("Excluded from this run: " + ", ".join(run["excluded_names"]))
-    if n == 1:
+    if n_found == 1:
         st.caption("The market found no other schedule with the same total of preference points (within %.2f), "
                    "so its choice is the only outcome." % sa.EQUIVALENT_POINTS)
     else:
@@ -444,11 +476,17 @@ def show_candidates(Session, cycle, run, participants, locked):
         st.caption("The market found %d schedules that satisfy the same total of preference points (within %.2f): "
                    "only who gets which equivalent bundle differs, typically who takes the heavier package. "
                    "Its own choice is listed first, picked by %s. The choice between them is yours."
-                   % (n, sa.EQUIVALENT_POINTS, rule))
-    columns = st.columns(len(cands)) if len(cands) <= 3 else [st.container(border=True) for _ in cands]
-    for k, cand in enumerate(cands):
+                   % (n_found, sa.EQUIVALENT_POINTS, rule))
+    show_all_key = "show_all_%d" % run["id"]  # the checkbox below the list; read before it is drawn
+    listed = listed_outcomes(n, run["chosen_index"], bool(st.session_state.get(show_all_key, False)))
+    note = listing_note(n, n_found, listed)
+    if note:
+        st.caption(note)
+    columns = st.columns(len(listed)) if len(listed) <= 3 else [st.container(border=True) for _ in listed]
+    for column, k in zip(columns, listed):
+        cand = cands[k]
         chosen = run["chosen_index"] == k
-        with columns[k]:
+        with column:
             flags = []
             if k > 0 and cand["equivalent_to_best"]:
                 flags.append("equivalent to outcome 1")
@@ -476,6 +514,8 @@ def show_candidates(Session, cycle, run, participants, locked):
                 if cand["package_prices"]:
                     st.write("Package prices: " + ", ".join("%s %+.1f" % kv for kv in cand["package_prices"].items()))
                 st.code(cand["report"], language=None)
+    if n > SHOWN_OUTCOMES:
+        st.checkbox("Show all %d outcomes" % n, key=show_all_key)
 
 
 def load_chosen(Session, cycle, run):
